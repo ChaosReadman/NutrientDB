@@ -5,13 +5,15 @@
 ## 1. 環境構築
 
 ```bash
-cd /Users/burabura/source/NutrientDB/
+cd NutrientDB/
 
 # Goモジュールの初期化と依存関係のインストール
 go mod init albion-app
 go get github.com/gofiber/fiber/v2
 go get github.com/gofiber/template/html/v2
 go get github.com/mattn/go-sqlite3
+go get golang.org/x/crypto/bcrypt
+go mod tidy
 
 # ホットリロードツール (Air) のインストール
 go install github.com/air-verse/air@latest

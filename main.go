@@ -7,6 +7,7 @@ import (
 	"albion-app/handlers" // モジュール名に合わせて適宜変更してください
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/session"
 	"github.com/gofiber/template/html/v2"
 	_ "github.com/mattn/go-sqlite3" // go get github.com/mattn/go-sqlite3 が必要
 )
@@ -20,6 +21,9 @@ func main() {
 		Views:       engine,
 		ViewsLayout: "layouts/main", // デフォルトのレイアウトファイルを指定
 	})
+
+	// セッションストアの初期化
+	store := session.New()
 
 	// 静的ファイル (CSS, JS, 画像) の配信設定
 	app.Static("/static", "./public")
@@ -35,11 +39,17 @@ func main() {
 	}
 
 	// ハンドラの初期化
-	foodHandler := &handlers.FoodHandler{DB: db}
+	foodHandler := &handlers.FoodHandler{DB: db, Store: store}
+	authHandler := &handlers.AuthHandler{DB: db, Store: store}
 
 	// ルーティング
 	app.Get("/", foodHandler.Index)
 	app.Get("/food/:id", foodHandler.Detail)
+	app.Get("/register", authHandler.ShowRegister)
+	app.Post("/register", authHandler.HandleRegister)
+	app.Get("/login", authHandler.ShowLogin)
+	app.Post("/login", authHandler.HandleLogin)
+	app.Get("/logout", authHandler.Logout)
 
 	// サーバー起動
 	log.Fatal(app.Listen(":3000"))

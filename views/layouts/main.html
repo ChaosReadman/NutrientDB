@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
     <meta charset="UTF-8">
     <title>{{.Title}}</title>
@@ -7,14 +8,28 @@
     <!-- 自前のCSSを読み込む -->
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
+
 <body>
-    <nav class="container">
-        <ul><li><strong>Nutrient DB</strong></li></ul>
+    <nav class="navbar navbar-expand-lg navbar-light bg-light">
+        <div class="container">
+            <a class="navbar-brand" href="/">NutrientDB</a>
+            <div class="navbar-nav ms-auto">
+                {{if .User}}
+                <span class="nav-link">こんにちは、<strong>{{.User}}</strong> さん</span>
+                <a class="nav-item nav-link" href="/logout">ログアウト</a>
+                {{else}}
+                <a class="nav-item nav-link" href="/login">ログイン</a>
+                <a class="nav-item nav-link" href="/register">新規登録</a>
+                {{end}}
+            </div>
+        </div>
     </nav>
+
     <main class="container">
         {{embed}} <!-- Djangoの {% block %} に近い役割です -->
     </main>
     <!-- 必要に応じてJSを読み込む -->
     <script src="/static/js/app.js"></script>
 </body>
+
 </html>

@@ -1,11 +1,12 @@
 import xml.etree.ElementTree as ET
 import sqlite3
 import re
+import os
 
-# XMLファイルパス
-xml_file_path = '/Users/takahiro_oku/source/Albion/data/nutrient.xml'
-# SQLiteデータベースファイルパス
-db_file_path = '/Users/takahiro_oku/source/Albion/data/nutrient.db'
+# スクリプトの場所を基準にパスを構成（移植性の向上とプライバシー保護）
+base_dir = os.path.dirname(os.path.abspath(__file__))
+xml_file_path = os.path.join(base_dir, 'nutrient.xml')
+db_file_path = os.path.join(base_dir, 'nutrient.db')
 
 def clean_value(value_str):
     """
@@ -102,6 +103,40 @@ def create_table(cursor, nutrient_tags):
     )
     """
     cursor.execute(create_table_sql)
+
+    # ユーザーテーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # お気に入りテーブル (多対多のリレーション)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS favorites (
+        user_id INTEGER,
+        food_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, food_id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (food_id) REFERENCES foods(food_id)
+    )
+    """)
+
+    # レシピテーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS recipes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        title TEXT NOT NULL,
+        description TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
 
 def insert_data(cursor, foods_data, nutrient_tags):
     """
