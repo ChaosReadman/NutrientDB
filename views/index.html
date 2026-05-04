@@ -1,0 +1,25 @@
+<h1>食品リスト</h1>
+
+<form action="/" method="GET">
+    <div style="display: flex; gap: 10px;">
+        <input type="text" name="q" placeholder="食品名で検索..." value="{{.Query}}">
+        <button type="submit">検索</button>
+    </div>
+</form>
+
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>名称</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .Foods}}
+        <tr>
+            <td>{{.ID}}</td>
+            <td><a href="/food/{{.ID}}">{{.Name}}</a></td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
