@@ -2,39 +2,33 @@ package models
 
 import (
 	"database/sql"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 type User struct {
-	ID       int
-	Username string
+	ID    int
+	Email string
+	Name  string
 }
 
-// Register は新しいユーザーを登録します
-func Register(db *sql.DB, username, password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
+// FindOrCreate はOAuth情報に基づいてユーザーを取得または新規作成します
+func FindOrCreate(db *sql.DB, email, name, provider, providerID string) (*User, error) {
+	var user User
+	err := db.QueryRow("SELECT id, email, name FROM users WHERE email = ?", email).Scan(&user.ID, &user.Email, &user.Name)
 
-	_, err = db.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", username, string(hash))
-	return err
-}
-
-// Authenticate はユーザーを認証します
-func Authenticate(db *sql.DB, username, password string) (*User, error) {
-	var u User
-	var hash string
-	err := db.QueryRow("SELECT id, username, password_hash FROM users WHERE username = ?", username).Scan(&u.ID, &u.Username, &hash)
-	if err != nil {
+	if err == sql.ErrNoRows {
+		// 新規ユーザー作成
+		res, err := db.Exec(
+			"INSERT INTO users (email, name, provider, provider_id) VALUES (?, ?, ?, ?)",
+			email, name, provider, providerID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		id, _ := res.LastInsertId()
+		return &User{ID: int(id), Email: email, Name: name}, nil
+	} else if err != nil {
 		return nil, err
 	}
 
-	err = bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	if err != nil {
-		return nil, err // パスワード不一致
-	}
-
-	return &u, nil
+	return &user, nil
 }

@@ -1,25 +1,25 @@
-<h1>食品リスト</h1>
+<hr>
 
-<form action="/" method="GET">
-    <div style="display: flex; gap: 10px;">
-        <input type="text" name="q" placeholder="食品名で検索..." value="{{.Query}}">
-        <button type="submit">検索</button>
-    </div>
-</form>
+<section>
+    <h2>レシピを探す</h2>
+    <form action="/" method="GET">
+        <div style="display: flex; gap: 10px;">
+            <input type="text" name="rq" placeholder="レシピ名で検索..." value="{{.RecipeQuery}}">
+            <button type="submit" class="contrast">レシピ検索</button>
+        </div>
+    </form>
 
-<table>
-    <thead>
-        <tr>
-            <th>ID</th>
-            <th>名称</th>
-        </tr>
-    </thead>
-    <tbody>
-        {{range .Foods}}
-        <tr>
-            <td>{{.ID}}</td>
-            <td><a href="/food/{{.ID}}">{{.Name}}</a></td>
-        </tr>
+    <div class="grid">
+        {{range .Recipes}}
+        <article>
+            <header><strong>{{.Title}}</strong></header>
+            <p style="font-size: 0.8rem; min-height: 3em;">{{.Description}}</p>
+            <footer>
+                <a href="/recipe/{{.ID}}" class="outline" style="font-size: 0.8rem;">詳しく見る</a>
+            </footer>
+        </article>
+        {{else}}
+        <p>レシピがまだありません。</p>
         {{end}}
-    </tbody>
-</table>
+    </div>
+</section>

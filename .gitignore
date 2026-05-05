@@ -22,3 +22,6 @@ data/*.db
 
 # OS specific files
 .DS_Store
+
+# Environment variables
+.env

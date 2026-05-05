@@ -108,8 +108,10 @@ def create_table(cursor, nutrient_tags):
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        name TEXT,
+        provider TEXT,
+        provider_id TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -135,6 +137,28 @@ def create_table(cursor, nutrient_tags):
         description TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+
+    # レシピ材料詳細テーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS recipe_ingredients (
+        recipe_id INTEGER,
+        food_id TEXT,
+        quantity REAL,
+        group_name TEXT,
+        FOREIGN KEY (recipe_id) REFERENCES recipes(id),
+        FOREIGN KEY (food_id) REFERENCES foods(food_id)
+    )
+    """)
+
+    # レシピ工程テーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS recipe_steps (
+        recipe_id INTEGER,
+        step_number INTEGER,
+        instruction TEXT,
+        FOREIGN KEY (recipe_id) REFERENCES recipes(id)
     )
     """)
 

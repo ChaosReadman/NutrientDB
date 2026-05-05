@@ -1,0 +1,47 @@
+<h1>{{.Title}}</h1>
+
+<form action="/recipe/{{.Recipe.ID}}/update" method="POST" id="recipe-form">
+    <label for="title">レシピ名</label>
+    <input type="text" id="title" name="title" value="{{.Recipe.Title}}" required>
+
+    <label for="description">説明</label>
+    <textarea id="description" name="description">{{.Recipe.Description}}</textarea>
+
+    <article>
+        <header><strong>調理工程</strong></header>
+        <div id="steps-container">
+            {{range .Recipe.Steps}}
+            <div class="step-item" style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;">
+                <span class="step-num">{{.StepNumber}}.</span>
+                <textarea name="steps" required>{{.Instruction}}</textarea>
+                <div style="display: flex; flex-direction: column; gap: 5px;">
+                    <button type="button" class="outline" style="padding: 2px 8px;" onclick="moveStep(this, -1)">↑</button>
+                    <button type="button" class="outline" style="padding: 2px 8px;" onclick="moveStep(this, 1)">↓</button>
+                    <button type="button" class="outline secondary" style="padding: 2px 8px;" onclick="removeStep(this)">×</button>
+                </div>
+            </div>
+            {{end}}
+        </div>
+        <button type="button" class="outline" onclick="addStep()">工程を追加</button>
+    </article>
+
+    <div style="margin-top: 2rem; display: flex; gap: 10px;">
+        <button type="submit">更新を保存する</button>
+        <a href="/recipe/{{.Recipe.ID}}" role="button" class="outline secondary">キャンセル</a>
+    </div>
+</form>
+
+<script>
+    function addStep() {
+        const container = document.getElementById('steps-container');
+        const stepCount = container.getElementsByClassName('step-item').length + 1;
+        const div = document.createElement('div');
+        div.className = 'step-item';
+        div.setAttribute('style', 'display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px;');
+        div.innerHTML = `<span class="step-num">${stepCount}.</span><textarea name="steps" required></textarea><div style="display: flex; flex-direction: column; gap: 5px;"><button type="button" class="outline" style="padding: 2px 8px;" onclick="moveStep(this, -1)">↑</button><button type="button" class="outline" style="padding: 2px 8px;" onclick="moveStep(this, 1)">↓</button><button type="button" class="outline secondary" style="padding: 2px 8px;" onclick="removeStep(this)">×</button></div>`;
+        container.appendChild(div);
+    }
+    function removeStep(btn) { if (document.getElementsByClassName('step-item').length > 1) { btn.closest('.step-item').remove(); updateStepNumbers(); } }
+    function moveStep(btn, dir) { const item = btn.closest('.step-item'); const container = document.getElementById('steps-container'); if (dir === -1 && item.previousElementSibling) container.insertBefore(item, item.previousElementSibling); else if (dir === 1 && item.nextElementSibling) container.insertBefore(item.nextElementSibling, item); updateStepNumbers(); }
+    function updateStepNumbers() { const nums = document.getElementsByClassName('step-num'); for (let i = 0; i < nums.length; i++) nums[i].innerText = (i + 1) + "."; }
+</script>
