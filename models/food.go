@@ -121,6 +121,37 @@ func SearchRecipes(db *sql.DB, query string) ([]map[string]interface{}, error) {
 	return recipes, nil
 }
 
+// SearchRecipesScoped は範囲（マイレシピ/全レシピ）を指定して検索します
+func SearchRecipesScoped(db *sql.DB, query string, userID int, scope string) ([]map[string]interface{}, error) {
+	var rows *sql.Rows
+	var err error
+
+	sql := "SELECT id, title, description FROM recipes WHERE (title LIKE ? OR description LIKE ?)"
+	args := []interface{}{"%" + query + "%", "%" + query + "%"}
+
+	if scope == "my" {
+		sql += " AND user_id = ?"
+		args = append(args, userID)
+	}
+
+	sql += " ORDER BY created_at DESC LIMIT 20"
+
+	rows, err = db.Query(sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var recipes []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var title, desc string
+		rows.Scan(&id, &title, &desc)
+		recipes = append(recipes, map[string]interface{}{"ID": id, "Title": title, "Description": desc})
+	}
+	return recipes, nil
+}
+
 type RecipeIngredientDetail struct {
 	FoodID    string
 	Name      string
@@ -181,4 +212,74 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 	}
 
 	return &r, nil
+}
+
+type CalendarEntryDetail struct {
+	ID        int
+	RecipeID  int
+	Title     string
+	MealType  string
+	EntryDate string
+}
+
+// GetCalendarEntries は指定したユーザーと日付の食事記録を取得します
+func GetCalendarEntries(db *sql.DB, userID int, date string) ([]CalendarEntryDetail, error) {
+	query := `
+		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, ce.entry_date
+		FROM calendar_entries ce
+		JOIN recipes r ON ce.recipe_id = r.id
+		WHERE ce.user_id = ? AND ce.entry_date = ?
+		ORDER BY CASE ce.meal_type 
+			WHEN 'breakfast' THEN 1 
+			WHEN 'lunch' THEN 2 
+			WHEN 'dinner' THEN 3 
+			ELSE 4 END`
+
+	rows, err := db.Query(query, userID, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []CalendarEntryDetail
+	for rows.Next() {
+		var e CalendarEntryDetail
+		rows.Scan(&e.ID, &e.RecipeID, &e.Title, &e.MealType, &e.EntryDate)
+		entries = append(entries, e)
+	}
+	return entries, nil
+}
+
+// GetUserRecipes はユーザーが作成したレシピ一覧を取得します
+func GetUserRecipes(db *sql.DB, userID int) ([]map[string]interface{}, error) {
+	rows, err := db.Query("SELECT id, title FROM recipes WHERE user_id = ? ORDER BY created_at DESC", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var recipes []map[string]interface{}
+	for rows.Next() {
+		var id int
+		var title string
+		rows.Scan(&id, &title)
+		recipes = append(recipes, map[string]interface{}{"ID": id, "Title": title})
+	}
+	return recipes, nil
+}
+
+// GetDailyCalories は指定したユーザーと日付の合計摂取カロリーを計算します
+func GetDailyCalories(db *sql.DB, userID int, date string) (float64, error) {
+	query := `
+		SELECT SUM(f.enerc_kcal * ri.quantity / 100.0)
+		FROM calendar_entries ce
+		JOIN recipe_ingredients ri ON ce.recipe_id = ri.recipe_id
+		JOIN foods f ON ri.food_id = f.food_id
+		WHERE ce.user_id = ? AND ce.entry_date = ?`
+
+	var total sql.NullFloat64
+	err := db.QueryRow(query, userID, date).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+	return total.Float64, nil
 }

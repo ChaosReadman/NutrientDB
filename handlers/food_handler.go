@@ -2,19 +2,25 @@ package handlers
 
 import (
 	"RecipeApp/models"
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/session"
+	"golang.org/x/oauth2"
 )
 
 type FoodHandler struct {
-	DB    *sql.DB
-	Store *session.Store
+	DB          *sql.DB
+	Store       *session.Store
+	OAuthConfig *oauth2.Config
 }
 
 // Ingredient は材料リストのアイテム構造体です
@@ -113,6 +119,20 @@ func (h *FoodHandler) SearchJSON(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(foods)
+}
+
+// SearchRecipesJSON はレシピを検索し JSON 形式で返します
+func (h *FoodHandler) SearchRecipesJSON(c *fiber.Ctx) error {
+	query := c.Query("q")
+	scope := c.Query("scope") // "my" or "all"
+	sess, _ := h.Store.Get(c)
+	userID := sess.Get("user_id").(int)
+
+	recipes, err := models.SearchRecipesScoped(h.DB, query, userID, scope)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+	return c.JSON(recipes)
 }
 
 // RemoveIngredient は材料リストからアイテムを削除します
@@ -342,6 +362,10 @@ func (h *FoodHandler) UpdateRecipe(c *fiber.Ctx) error {
 		return c.Status(500).SendString(err.Error())
 	}
 
+	// セッションの材料リストをクリア
+	sess.Delete("ingredients")
+	sess.Save()
+
 	return c.Redirect("/recipe/" + id)
 }
 
@@ -390,4 +414,173 @@ func (h *FoodHandler) getMyIngredients(c *fiber.Ctx) []models.Food {
 		}
 	}
 	return myIngredients
+}
+
+// CalendarIndex はカレンダー画面を表示します
+func (h *FoodHandler) CalendarIndex(c *fiber.Ctx) error {
+	sess, _ := h.Store.Get(c)
+	user := sess.Get("username")
+	userID, ok := sess.Get("user_id").(int)
+	if !ok {
+		return c.Redirect("/login")
+	}
+
+	// 日付の取得（クエリになければ今日）
+	dateStr := c.Query("date")
+	if dateStr == "" {
+		dateStr = time.Now().Format("2006-01-02")
+	}
+
+	entries, err := models.GetCalendarEntries(h.DB, userID, dateStr)
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+
+	totalCalories, err := models.GetDailyCalories(h.DB, userID, dateStr)
+	if err != nil {
+		log.Println("Calorie calculation error:", err)
+	}
+
+	return c.Render("calendar", fiber.Map{
+		"Title":                "食事カレンダー",
+		"User":                 user,
+		"Date":                 dateStr,
+		"Entries":              entries,
+		"TotalIntake":          int(totalCalories),
+		"HideIngredientDrawer": true, // これにより小窓が非表示になります
+		"Ingredients":          h.getIngredientsFromSession(c),
+		"MyIngredients":        h.getMyIngredients(c),
+	})
+}
+
+// AddToCalendar はレシピをカレンダーに登録します
+func (h *FoodHandler) AddToCalendar(c *fiber.Ctx) error {
+	sess, _ := h.Store.Get(c)
+	userID, ok := sess.Get("user_id").(int)
+	if !ok {
+		return c.Redirect("/login")
+	}
+
+	mealType := c.FormValue("meal_type") // breakfast, lunch, dinner
+	date := c.FormValue("date")          // YYYY-MM-DD
+
+	// 複数の recipe_ids を取得
+	recipeIDs := c.Request().PostArgs().PeekMulti("recipe_ids")
+	for _, idByte := range recipeIDs {
+		recipeID := string(idByte)
+		_, err := h.DB.Exec("INSERT INTO calendar_entries (user_id, recipe_id, entry_date, meal_type) VALUES (?, ?, ?, ?)",
+			userID, recipeID, date, mealType)
+		if err != nil {
+			log.Println("Calendar insert error:", err)
+			return c.Status(500).SendString("登録中にエラーが発生しました")
+		}
+	}
+
+	return c.Redirect("/calendar")
+}
+
+// DisconnectHealthData は健康データの連携を解除します
+func (h *FoodHandler) DisconnectHealthData(c *fiber.Ctx) error {
+	sess, _ := h.Store.Get(c)
+
+	// セッションからトークン情報を削除
+	sess.Delete("oauth_token")
+
+	if err := sess.Save(); err != nil {
+		return c.Status(500).SendString("連携解除に失敗しました")
+	}
+
+	return c.Redirect("/calendar")
+}
+
+// SyncHealthData は健康データを同期するスタブ（概念）
+func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
+	sess, _ := h.Store.Get(c)
+	rawToken := sess.Get("oauth_token")
+	if rawToken == nil {
+		return c.Status(401).SendString("OAuthトークンが見つかりません。再ログインしてください。")
+	}
+
+	var token oauth2.Token
+	if err := json.Unmarshal([]byte(rawToken.(string)), &token); err != nil {
+		return c.Status(500).SendString("トークンの解析に失敗しました")
+	}
+
+	// oauth2ライブラリがトークンの有効期限を確認し、必要なら自動でリフレッシュするクライアントを提供します
+	ctx := context.Background()
+	client := h.OAuthConfig.Client(ctx, &token)
+
+	// 今日の 00:00:00 から 23:59:59 までの期間をミリ秒で計算
+	now := time.Now()
+	startTime := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	endTime := startTime.Add(24 * time.Hour).Add(-time.Nanosecond)
+
+	requestBody := map[string]interface{}{
+		"aggregateBy": []map[string]interface{}{
+			{"dataTypeName": "com.google.step_count.delta"},
+			{"dataTypeName": "com.google.calories.expended"},
+			{"dataTypeName": "com.google.nutrition"},
+		},
+		"bucketByTime":    map[string]interface{}{"durationMillis": 86400000}, // 1日分
+		"startTimeMillis": startTime.UnixNano() / int64(time.Millisecond),
+		"endTimeMillis":   endTime.UnixNano() / int64(time.Millisecond),
+	}
+
+	jsonReq, _ := json.Marshal(requestBody)
+	resp, err := client.Post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate", "application/json", bytes.NewBuffer(jsonReq))
+	if err != nil {
+		return c.Status(500).SendString("Google Fit APIへのリクエストに失敗しました")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Google Fit API Error: %s, Details: %s", resp.Status, string(body))
+		return c.Status(resp.StatusCode).SendString("Google Fit APIエラー: " + string(body))
+	}
+
+	// Google Fitのレスポンス構造を解析するための構造体
+	var fitData struct {
+		Bucket []struct {
+			Dataset []struct {
+				Point []struct {
+					Value []struct {
+						IntVal int     `json:"intVal"`
+						FpVal  float64 `json:"fpVal"`
+					} `json:"value"`
+				} `json:"point"`
+			} `json:"dataset"`
+		} `json:"bucket"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&fitData); err != nil {
+		return c.Status(500).SendString("APIレスポンスの解析に失敗しました")
+	}
+
+	steps := 0
+	calories := 0.0
+
+	// 取得したバケットから歩数とカロリーを抽出
+	if len(fitData.Bucket) > 0 {
+		for _, ds := range fitData.Bucket[0].Dataset {
+			for _, p := range ds.Point {
+				for _, v := range p.Value {
+					// 歩数は intVal、カロリーは fpVal に格納される
+					if v.IntVal > 0 {
+						steps += v.IntVal
+					}
+					if v.FpVal > 0 {
+						calories += v.FpVal
+					}
+				}
+			}
+		}
+	}
+
+	return c.JSON(fiber.Map{
+		"message":         "Google Fit と同期しました",
+		"burned_calories": int(calories),
+		"steps":           steps,
+		"status":          "Success",
+	})
 }

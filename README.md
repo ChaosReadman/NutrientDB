@@ -5,7 +5,7 @@
 ## 1. 環境構築
 
 ```bash
-cd NutrientDB/
+cd RecipeApp/
 
 # Goモジュールの初期化と依存関係のインストール
 go mod init RecipeApp
@@ -19,9 +19,9 @@ go mod tidy
 
 # ホットリロードツール (Air) のインストール
 go install github.com/air-verse/air@latest
-echo 'export PATH=$PATH:$(go env GOPATH)/bin' >> ~/.zshrc
+echo 'export GOPATH=$(go env GOPATH)' >> ~/.zshrc
+echo 'export PATH=$PATH:$GOPATH/bin' >> ~/.zshrc
 source ~/.zshrc
-```
 
 ## 2. データベースの準備
 

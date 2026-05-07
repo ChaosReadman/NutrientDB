@@ -36,8 +36,15 @@ func main() {
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		RedirectURL:  os.Getenv("GOOGLE_REDIRECT_URL"),
-		Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"},
-		Endpoint:     google.Endpoint,
+		Scopes: []string{
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+			"https://www.googleapis.com/auth/fitness.activity.read",   // 運動量（消費カロリー）取得用
+			"https://www.googleapis.com/auth/fitness.body.read",       // 体重・基礎代謝計算用
+			"https://www.googleapis.com/auth/fitness.nutrition.read",  // 栄養素の読み取り
+			"https://www.googleapis.com/auth/fitness.nutrition.write", // 栄養素の書き込み
+		},
+		Endpoint: google.Endpoint,
 	}
 
 	// 環境変数が正しく設定されているかチェック
@@ -62,7 +69,7 @@ func main() {
 	}
 
 	// ハンドラの初期化
-	foodHandler := &handlers.FoodHandler{DB: db, Store: store}
+	foodHandler := &handlers.FoodHandler{DB: db, Store: store, OAuthConfig: conf}
 	authHandler := &handlers.AuthHandler{DB: db, Store: store, OAuthConfig: conf}
 
 	// 認証チェック用ミドルウェア
@@ -95,6 +102,13 @@ func main() {
 	app.Get("/recipe/:id", authRequired, foodHandler.RecipeDetail)
 	app.Get("/recipe/:id/edit", authRequired, foodHandler.EditRecipe)
 	app.Post("/recipe/:id/update", authRequired, foodHandler.UpdateRecipe)
+
+	// カレンダー & 健康データ
+	app.Get("/calendar", authRequired, foodHandler.CalendarIndex)
+	app.Post("/calendar/add", authRequired, foodHandler.AddToCalendar)
+	app.Post("/api/health/disconnect", authRequired, foodHandler.DisconnectHealthData)
+	app.Get("/api/recipes/search", authRequired, foodHandler.SearchRecipesJSON)
+	app.Get("/api/health/sync", authRequired, foodHandler.SyncHealthData)
 
 	// サーバー起動
 	log.Fatal(app.Listen(":3000"))

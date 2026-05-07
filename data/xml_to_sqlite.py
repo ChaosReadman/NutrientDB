@@ -162,6 +162,19 @@ def create_table(cursor, nutrient_tags):
     )
     """)
 
+    # カレンダー（食事記録）テーブル
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS calendar_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        recipe_id INTEGER,
+        entry_date DATE DEFAULT (DATE('now')),
+        meal_type TEXT, -- 'breakfast', 'lunch', 'dinner', 'snack'
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (recipe_id) REFERENCES recipes(id)
+    )
+    """)
+
 def insert_data(cursor, foods_data, nutrient_tags):
     """
     抽出したデータをSQLiteデータベースに挿入する。
@@ -176,10 +189,10 @@ def insert_data(cursor, foods_data, nutrient_tags):
     INSERT INTO foods ({', '.join(all_columns)})
     VALUES ({placeholders})
     """
-    
-    for food_item in foods_data:
-        values = [food_item.get(col) for col in all_columns]
-        cursor.execute(insert_sql, values)
+
+    # リスト内包表記で一括データを作成し、executemanyで高速挿入
+    data_tuples = [[item.get(col) for col in all_columns] for item in foods_data]
+    cursor.executemany(insert_sql, data_tuples)
 
 def main():
     conn = None
@@ -195,6 +208,10 @@ def main():
         print("テーブルを作成中...")
         create_table(cursor, nutrient_tags)
         print("テーブル作成完了。")
+
+        # 食品マスターデータのみをリフレッシュ（ユーザーデータは残す）
+        print("既存の食品データをクリア中...")
+        cursor.execute("DELETE FROM foods")
 
         print("データを挿入中...")
         insert_data(cursor, foods_data, nutrient_tags)

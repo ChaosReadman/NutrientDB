@@ -20,13 +20,16 @@ type AuthHandler struct {
 // ShowLogin はログイン画面を表示します
 func (h *AuthHandler) ShowLogin(c *fiber.Ctx) error {
 	return c.Render("login", fiber.Map{
-		"Title": "ログイン",
+		"Title":                "ログイン",
+		"HideIngredientDrawer": true,
 	})
 }
 
 // Login リダイレクト処理
 func (h *AuthHandler) Login(c *fiber.Ctx) error {
-	url := h.OAuthConfig.AuthCodeURL("state")
+	// 本来はセッションにランダムな文字列を保存し、Callbackで一致確認を行う(CSRF対策)
+	// 現状は実装の簡略化のため固定値 "state" を使用
+	url := h.OAuthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 	return c.Redirect(url)
 }
 
@@ -55,7 +58,9 @@ func (h *AuthHandler) Callback(c *fiber.Ctx) error {
 		Email string `json:"email"`
 		Name  string `json:"name"`
 	}
-	json.NewDecoder(resp.Body).Decode(&profile)
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return c.Status(500).SendString("プロフィールの解析に失敗しました")
+	}
 
 	// DBでユーザーを特定または作成
 	user, err := models.FindOrCreate(h.DB, profile.Email, profile.Name, "google", profile.ID)
@@ -65,9 +70,12 @@ func (h *AuthHandler) Callback(c *fiber.Ctx) error {
 
 	// セッションに名前をセット
 	sess, _ := h.Store.Get(c)
+	tokenData, _ := json.Marshal(token)
+
 	sess.Set("user_id", user.ID)
 	sess.Set("username", user.Name)
-	sess.Save()
+	sess.Set("oauth_token", string(tokenData))
+	_ = sess.Save()
 
 	return c.Redirect("/")
 }
