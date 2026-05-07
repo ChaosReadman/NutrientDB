@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"time"
@@ -466,81 +467,136 @@ func (h *FoodHandler) AddToCalendar(c *fiber.Ctx) error {
 
 	// 複数の recipe_ids を取得
 	recipeIDs := c.Request().PostArgs().PeekMulti("recipe_ids")
+
+	tx, err := h.DB.Begin()
+	if err != nil {
+		return c.Status(500).SendString(err.Error())
+	}
+
+	// 【Delete-Insert】指定された食事区分のデータを一度削除
+	_, _ = tx.Exec("DELETE FROM calendar_entries WHERE user_id = ? AND entry_date = ? AND meal_type = ?", userID, date, mealType)
+
 	for _, idByte := range recipeIDs {
 		recipeID := string(idByte)
-		_, err := h.DB.Exec("INSERT INTO calendar_entries (user_id, recipe_id, entry_date, meal_type) VALUES (?, ?, ?, ?)",
+		_, err := tx.Exec("INSERT INTO calendar_entries (user_id, recipe_id, entry_date, meal_type, is_synced) VALUES (?, ?, ?, ?, 0)",
 			userID, recipeID, date, mealType)
 		if err != nil {
+			tx.Rollback()
 			log.Println("Calendar insert error:", err)
 			return c.Status(500).SendString("登録中にエラーが発生しました")
 		}
 	}
 
-	// Google Fit から健康データを自動同期して保存
-	rawToken := sess.Get("oauth_token")
-	if rawToken != nil {
-		var token oauth2.Token
-		if err := json.Unmarshal([]byte(rawToken.(string)), &token); err == nil {
-			ctx := context.Background()
-			client := h.OAuthConfig.Client(ctx, &token)
-
-			// フォームで指定された日付の範囲を計算
-			t, _ := time.Parse("2006-01-02", date)
-			startTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-			endTime := startTime.Add(24 * time.Hour).Add(-time.Nanosecond)
-
-			requestBody := map[string]interface{}{
-				"aggregateBy": []map[string]interface{}{
-					{"dataTypeName": "com.google.step_count.delta"},
-					{"dataTypeName": "com.google.calories.expended"},
-				},
-				"bucketByTime":    map[string]interface{}{"durationMillis": 86400000},
-				"startTimeMillis": startTime.UnixNano() / int64(time.Millisecond),
-				"endTimeMillis":   endTime.UnixNano() / int64(time.Millisecond),
-			}
-
-			jsonReq, _ := json.Marshal(requestBody)
-			resp, err := client.Post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate", "application/json", bytes.NewBuffer(jsonReq))
-			if err == nil && resp.StatusCode == 200 {
-				var fitData struct {
-					Bucket []struct {
-						Dataset []struct {
-							Point []struct {
-								Value []struct {
-									IntVal int     `json:"intVal"`
-									FpVal  float64 `json:"fpVal"`
-								} `json:"value"`
-							} `json:"point"`
-						} `json:"dataset"`
-					} `json:"bucket"`
-				}
-				if err := json.NewDecoder(resp.Body).Decode(&fitData); err == nil && len(fitData.Bucket) > 0 {
-					steps, calories := 0, 0.0
-					for _, ds := range fitData.Bucket[0].Dataset {
-						for _, p := range ds.Point {
-							for _, v := range p.Value {
-								if v.IntVal > 0 {
-									steps += v.IntVal
-								}
-								if v.FpVal > 0 {
-									calories += v.FpVal
-								}
-							}
-						}
-					}
-					// 取得したデータをDBに保存（テーブル名などは既存の構成に合わせる想定）
-					_, err := h.DB.Exec("INSERT INTO daily_health_data (user_id, date, steps, burned_calories) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories",
-						userID, date, steps, int(calories))
-					if err != nil {
-						log.Println("Health data upsert error:", err)
-					}
-				}
-				resp.Body.Close()
-			}
-		}
-	}
+	tx.Commit()
+	// 健康データの同期フラグも落としておく
+	_, _ = h.DB.Exec("UPDATE daily_health_data SET is_synced = 0 WHERE user_id = ? AND date = ?", userID, date)
 
 	return c.Redirect("/calendar")
+}
+
+// RemoveFromCalendar はカレンダーから特定の食事記録を削除します
+func (h *FoodHandler) RemoveFromCalendar(c *fiber.Ctx) error {
+	id := c.Params("id")
+	sess, _ := h.Store.Get(c)
+	userID, ok := sess.Get("user_id").(int)
+	if !ok {
+		return c.Redirect("/login")
+	}
+
+	// 日付を取得しておく（リダイレクトと同期フラグ更新用）
+	var date string
+	err := h.DB.QueryRow("SELECT entry_date FROM calendar_entries WHERE id = ? AND user_id = ?", id, userID).Scan(&date)
+	if err != nil {
+		return c.Redirect("/calendar")
+	}
+
+	// 削除実行
+	_, _ = h.DB.Exec("DELETE FROM calendar_entries WHERE id = ? AND user_id = ?", id, userID)
+
+	// 健康データの同期フラグを落とす（内容に変更があったため、再同期を促す）
+	_, _ = h.DB.Exec("UPDATE daily_health_data SET is_synced = 0 WHERE user_id = ? AND date = ?", userID, date)
+
+	return c.Redirect("/calendar?date=" + date)
+}
+
+// syncNutritionToFit はレシピの栄養素を Google Fit に書き込みます
+func (h *FoodHandler) syncNutritionToFit(
+	c *fiber.Ctx,
+	title string,
+	calories, protein, fat, carbs, fiber, sodium float64,
+	dateStr string,
+	mealType int,
+) {
+	sess, _ := h.Store.Get(c)
+	rawToken := sess.Get("oauth_token")
+	var token oauth2.Token
+	json.Unmarshal([]byte(rawToken.(string)), &token)
+
+	client := h.OAuthConfig.Client(context.Background(), &token)
+
+	t, _ := time.Parse("2006-01-02", dateStr)
+	// ナノ秒単位のタイムスタンプが必要
+	startTimeNanos := t.UnixNano()
+	endTimeNanos := t.Add(1 * time.Hour).UnixNano()
+
+	// Fit の Nutrition データ構造を作成
+	nutritionMap := map[string]float64{
+		"calories":      calories,
+		"protein":       protein,
+		"fat.total":     fat,
+		"carbs.total":   carbs,
+		"dietary_fiber": fiber,
+		"sodium":        sodium / 1000, // mg -> g
+	}
+
+	requestBody := map[string]interface{}{
+		"dataSourceId":   "derived:com.google.nutrition:com.google.android.gms:merged",
+		"minStartTimeNs": startTimeNanos,
+		"maxEndTimeNs":   endTimeNanos,
+		"point": []map[string]interface{}{
+			{
+				"startTimeNanos": startTimeNanos,
+				"endTimeNanos":   endTimeNanos,
+				"dataTypeName":   "com.google.nutrition",
+				"value": []map[string]interface{}{
+					{"mapVal": h.formatNutritionMap(nutritionMap)},
+					{"intVal": mealType},
+					{"strVal": title},
+				},
+			},
+		},
+	}
+
+	jsonReq, _ := json.Marshal(requestBody)
+	// dataset:patch を使用してデータをアップロード
+	datasetID := string(startTimeNanos) + "-" + string(endTimeNanos)
+	url := "https://www.googleapis.com/fitness/v1/users/me/dataSources/derived:com.google.nutrition:com.google.android.gms:merged/datasets/" + datasetID
+
+	req, _ := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonReq))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("Google Fit Nutrition Sync Error:", err)
+	} else {
+		resp.Body.Close()
+		log.Printf("Nutritional data for '%s' synced to Google Fit. Status: %s", title, resp.Status)
+	}
+}
+
+// Fit の形式（key: {fpVal: val}）に変換するヘルパー
+func (h *FoodHandler) formatNutritionMap(m map[string]float64) []map[string]interface{} {
+	var res []map[string]interface{}
+	for k, v := range m {
+		if v > 0 {
+			res = append(res, map[string]interface{}{
+				"key": k,
+				"value": map[string]interface{}{
+					"fpVal": v,
+				},
+			})
+		}
+	}
+	return res
 }
 
 // DisconnectHealthData は健康データの連携を解除します
@@ -564,26 +620,54 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 	if rawToken == nil {
 		return c.Status(401).SendString("OAuthトークンが見つかりません。再ログインしてください。")
 	}
+	userID := sess.Get("user_id").(int)
+
+	// 同期対象の日付を取得
+	dateStr := c.Query("date")
+	if dateStr == "" {
+		dateStr = time.Now().Format("2006-01-02")
+	}
+
+	// 1. 未同期の食事データを Google Fit へ送信 (Push)
+	entries, err := models.GetCalendarEntries(h.DB, userID, dateStr)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsSynced {
+				recipe, _ := models.GetRecipeByID(h.DB, string(rune(e.RecipeID)))
+				if recipe != nil {
+					fitMealType := 4 // default snack
+					switch e.MealType {
+					case "breakfast":
+						fitMealType = 1
+					case "lunch":
+						fitMealType = 2
+					case "dinner":
+						fitMealType = 3
+					}
+					h.syncNutritionToFit(c, recipe.Title, recipe.TotalCalories, recipe.TotalProtein, recipe.TotalFat, recipe.TotalCarbs, recipe.TotalFiber, recipe.TotalSodium, dateStr, fitMealType)
+				}
+				// 同期済みフラグを更新
+				_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE id = ?", e.ID)
+			}
+		}
+	}
 
 	var token oauth2.Token
 	if err := json.Unmarshal([]byte(rawToken.(string)), &token); err != nil {
 		return c.Status(500).SendString("トークンの解析に失敗しました")
 	}
 
-	// oauth2ライブラリがトークンの有効期限を確認し、必要なら自動でリフレッシュするクライアントを提供します
-	ctx := context.Background()
-	client := h.OAuthConfig.Client(ctx, &token)
-
-	// 今日の 00:00:00 から 23:59:59 までの期間をミリ秒で計算
-	now := time.Now()
-	startTime := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	// 2. Google Fit から活動データを取得 (Pull)
+	t, _ := time.Parse("2006-01-02", dateStr)
+	startTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
 	endTime := startTime.Add(24 * time.Hour).Add(-time.Nanosecond)
+
+	client := h.OAuthConfig.Client(context.Background(), &token)
 
 	requestBody := map[string]interface{}{
 		"aggregateBy": []map[string]interface{}{
 			{"dataTypeName": "com.google.step_count.delta"},
 			{"dataTypeName": "com.google.calories.expended"},
-			{"dataTypeName": "com.google.nutrition"},
 		},
 		"bucketByTime":    map[string]interface{}{"durationMillis": 86400000}, // 1日分
 		"startTimeMillis": startTime.UnixNano() / int64(time.Millisecond),
@@ -641,10 +725,11 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(fiber.Map{
-		"message":         "Google Fit と同期しました",
-		"burned_calories": int(calories),
-		"steps":           steps,
-		"status":          "Success",
-	})
+	// 取得した活動データをDBに保存
+	_, _ = h.DB.Exec(`INSERT INTO daily_health_data (user_id, date, steps, burned_calories, is_synced) 
+		VALUES (?, ?, ?, ?, 1) 
+		ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories, is_synced=1`,
+		userID, dateStr, steps, int(calories))
+
+	return c.Redirect("/calendar?date=" + dateStr)
 }

@@ -165,12 +165,18 @@ type RecipeStepDetail struct {
 }
 
 type RecipeFull struct {
-	ID          int
-	UserID      int
-	Title       string
-	Description string
-	Ingredients []RecipeIngredientDetail
-	Steps       []RecipeStepDetail
+	ID            int
+	UserID        int
+	Title         string
+	Description   string
+	Ingredients   []RecipeIngredientDetail
+	Steps         []RecipeStepDetail
+	TotalCalories float64
+	TotalProtein  float64
+	TotalFat      float64
+	TotalCarbs    float64
+	TotalFiber    float64
+	TotalSodium   float64
 }
 
 // GetRecipeByID はレシピの全情報を取得します
@@ -185,7 +191,9 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 
 	// 材料の取得 (foodsテーブルと結合して名称を取得)
 	rows, err := db.Query(`
-		SELECT f.food_id, f.name, ri.quantity, ri.group_name 
+		SELECT f.food_id, f.name, ri.quantity, ri.group_name,
+		       COALESCE(f.enerc_kcal, 0), COALESCE(f.prot_, 0), COALESCE(f.fat_, 0), 
+		       COALESCE(f.chocdf_, 0), COALESCE(f.fibtg_, 0), COALESCE(f.na_, 0)
 		FROM recipe_ingredients ri 
 		JOIN foods f ON ri.food_id = f.food_id 
 		WHERE ri.recipe_id = ?`, id)
@@ -195,8 +203,17 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var ing RecipeIngredientDetail
-		rows.Scan(&ing.FoodID, &ing.Name, &ing.Quantity, &ing.GroupName)
+		var kcal, prot, fat, carb, fiber, sodium float64
+		rows.Scan(&ing.FoodID, &ing.Name, &ing.Quantity, &ing.GroupName, &kcal, &prot, &fat, &carb, &fiber, &sodium)
 		r.Ingredients = append(r.Ingredients, ing)
+
+		// 合計栄養素の計算 (食品データは100gあたりの値)
+		r.TotalCalories += (kcal * ing.Quantity / 100.0)
+		r.TotalProtein += (prot * ing.Quantity / 100.0)
+		r.TotalFat += (fat * ing.Quantity / 100.0)
+		r.TotalCarbs += (carb * ing.Quantity / 100.0)
+		r.TotalFiber += (fiber * ing.Quantity / 100.0)
+		r.TotalSodium += (sodium * ing.Quantity / 100.0)
 	}
 
 	// 工程の取得
@@ -220,12 +237,13 @@ type CalendarEntryDetail struct {
 	Title     string
 	MealType  string
 	EntryDate string
+	IsSynced  bool
 }
 
 // GetCalendarEntries は指定したユーザーと日付の食事記録を取得します
 func GetCalendarEntries(db *sql.DB, userID int, date string) ([]CalendarEntryDetail, error) {
 	query := `
-		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, ce.entry_date
+		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, ce.entry_date, ce.is_synced
 		FROM calendar_entries ce
 		JOIN recipes r ON ce.recipe_id = r.id
 		WHERE ce.user_id = ? AND ce.entry_date = ?
@@ -244,7 +262,7 @@ func GetCalendarEntries(db *sql.DB, userID int, date string) ([]CalendarEntryDet
 	var entries []CalendarEntryDetail
 	for rows.Next() {
 		var e CalendarEntryDetail
-		rows.Scan(&e.ID, &e.RecipeID, &e.Title, &e.MealType, &e.EntryDate)
+		rows.Scan(&e.ID, &e.RecipeID, &e.Title, &e.MealType, &e.EntryDate, &e.IsSynced)
 		entries = append(entries, e)
 	}
 	return entries, nil

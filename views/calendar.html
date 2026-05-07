@@ -2,6 +2,15 @@
     <h1>食事カレンダー</h1>
 </header>
 
+<div style="margin-bottom: 2rem; display: flex; justify-content: flex-end; align-items: center; gap: 15px;">
+    {{$unsynced := false}}
+    {{range .Entries}}{{if not .IsSynced}}{{$unsynced = true}}{{end}}{{end}}
+    {{if $unsynced}}
+        <span style="color: #d81b60; font-size: 0.8rem;">⚠️ 未同期の食事があります</span>
+    {{end}}
+    <a href="/api/health/sync?date={{.Date}}" role="button" class="contrast">🔄 Google Fit と同期する</a>
+</div>
+
 <div class="grid">
     <!-- 食事記録リスト -->
     <div>
@@ -44,7 +53,14 @@
                             {{if eq .MealType "breakfast"}}朝食{{else if eq .MealType "lunch"}}昼食{{else if eq .MealType "dinner"}}夕食{{else}}間食{{end}}
                         </mark>
                         <a href="/recipe/{{.RecipeID}}" style="margin-left: 8px; font-size: 0.9rem;">{{.Title}}</a>
+                        {{if .IsSynced}}
+                            <small style="color: #4caf50; margin-left: 5px;">✓ Synced</small>
+                        {{end}}
                     </div>
+                    <!-- 削除ボタン（✕）を追加 -->
+                    <form action="/calendar/remove/{{.ID}}" method="POST" style="margin: 0;">
+                        <button type="submit" class="outline secondary" style="padding: 2px 8px; font-size: 0.7rem; border: none; margin: 0; line-height: 1;">✕</button>
+                    </form>
                 </div>
                 {{end}}
             {{else}}

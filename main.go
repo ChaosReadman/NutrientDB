@@ -80,6 +80,11 @@ func main() {
 		log.Fatal("Failed to initialize table:", err)
 	}
 
+	// calendar_entries に is_synced カラムを追加 (存在しない場合)
+	// SQLiteでは同一ステートメントでのIF NOT EXISTSカラム追加が難しいためExecで試行
+	_, _ = db.Exec("ALTER TABLE calendar_entries ADD COLUMN is_synced INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE daily_health_data ADD COLUMN is_synced INTEGER DEFAULT 0")
+
 	// ハンドラの初期化
 	foodHandler := &handlers.FoodHandler{DB: db, Store: store, OAuthConfig: conf}
 	authHandler := &handlers.AuthHandler{DB: db, Store: store, OAuthConfig: conf}
@@ -118,6 +123,7 @@ func main() {
 	// カレンダー & 健康データ
 	app.Get("/calendar", authRequired, foodHandler.CalendarIndex)
 	app.Post("/calendar/add", authRequired, foodHandler.AddToCalendar)
+	app.Post("/calendar/remove/:id", authRequired, foodHandler.RemoveFromCalendar)
 	app.Post("/api/health/disconnect", authRequired, foodHandler.DisconnectHealthData)
 	app.Get("/api/recipes/search", authRequired, foodHandler.SearchRecipesJSON)
 	app.Get("/api/health/sync", authRequired, foodHandler.SyncHealthData)
