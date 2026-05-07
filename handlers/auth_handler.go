@@ -22,7 +22,7 @@ func (h *AuthHandler) ShowLogin(c *fiber.Ctx) error {
 	return c.Render("login", fiber.Map{
 		"Title":                "ログイン",
 		"HideIngredientDrawer": true,
-	})
+	}, "") // ログイン画面には共通レイアウトを適用しない
 }
 
 // Login リダイレクト処理

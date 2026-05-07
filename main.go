@@ -28,7 +28,7 @@ func main() {
 
 	app := fiber.New(fiber.Config{
 		Views:       engine,
-		ViewsLayout: "layouts/main", // デフォルトのレイアウトファイルを指定
+		ViewsLayout: "layout", // views/layout.html をデフォルトで使用
 	})
 
 	// OAuth設定 (環境変数から読み込むのが一般的)
@@ -66,6 +66,18 @@ func main() {
 	defer db.Close()
 	if err := db.Ping(); err != nil {
 		log.Fatal("Database connection failed:", err)
+	}
+
+	// テーブルの自動生成（簡易マイグレーション）
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS daily_health_data (
+		user_id INTEGER NOT NULL,
+		date TEXT NOT NULL,
+		steps INTEGER DEFAULT 0,
+		burned_calories INTEGER DEFAULT 0,
+		PRIMARY KEY (user_id, date)
+	);`)
+	if err != nil {
+		log.Fatal("Failed to initialize table:", err)
 	}
 
 	// ハンドラの初期化

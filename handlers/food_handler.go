@@ -476,6 +476,70 @@ func (h *FoodHandler) AddToCalendar(c *fiber.Ctx) error {
 		}
 	}
 
+	// Google Fit から健康データを自動同期して保存
+	rawToken := sess.Get("oauth_token")
+	if rawToken != nil {
+		var token oauth2.Token
+		if err := json.Unmarshal([]byte(rawToken.(string)), &token); err == nil {
+			ctx := context.Background()
+			client := h.OAuthConfig.Client(ctx, &token)
+
+			// フォームで指定された日付の範囲を計算
+			t, _ := time.Parse("2006-01-02", date)
+			startTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+			endTime := startTime.Add(24 * time.Hour).Add(-time.Nanosecond)
+
+			requestBody := map[string]interface{}{
+				"aggregateBy": []map[string]interface{}{
+					{"dataTypeName": "com.google.step_count.delta"},
+					{"dataTypeName": "com.google.calories.expended"},
+				},
+				"bucketByTime":    map[string]interface{}{"durationMillis": 86400000},
+				"startTimeMillis": startTime.UnixNano() / int64(time.Millisecond),
+				"endTimeMillis":   endTime.UnixNano() / int64(time.Millisecond),
+			}
+
+			jsonReq, _ := json.Marshal(requestBody)
+			resp, err := client.Post("https://www.googleapis.com/fitness/v1/users/me/dataset:aggregate", "application/json", bytes.NewBuffer(jsonReq))
+			if err == nil && resp.StatusCode == 200 {
+				var fitData struct {
+					Bucket []struct {
+						Dataset []struct {
+							Point []struct {
+								Value []struct {
+									IntVal int     `json:"intVal"`
+									FpVal  float64 `json:"fpVal"`
+								} `json:"value"`
+							} `json:"point"`
+						} `json:"dataset"`
+					} `json:"bucket"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&fitData); err == nil && len(fitData.Bucket) > 0 {
+					steps, calories := 0, 0.0
+					for _, ds := range fitData.Bucket[0].Dataset {
+						for _, p := range ds.Point {
+							for _, v := range p.Value {
+								if v.IntVal > 0 {
+									steps += v.IntVal
+								}
+								if v.FpVal > 0 {
+									calories += v.FpVal
+								}
+							}
+						}
+					}
+					// 取得したデータをDBに保存（テーブル名などは既存の構成に合わせる想定）
+					_, err := h.DB.Exec("INSERT INTO daily_health_data (user_id, date, steps, burned_calories) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories",
+						userID, date, steps, int(calories))
+					if err != nil {
+						log.Println("Health data upsert error:", err)
+					}
+				}
+				resp.Body.Close()
+			}
+		}
+	}
+
 	return c.Redirect("/calendar")
 }
 
