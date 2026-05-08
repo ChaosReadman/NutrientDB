@@ -102,9 +102,9 @@ func SearchRecipes(db *sql.DB, query string) ([]map[string]interface{}, error) {
 	var rows *sql.Rows
 	var err error
 	if query != "" {
-		rows, err = db.Query("SELECT id, title, description FROM recipes WHERE title LIKE ? OR description LIKE ? LIMIT 20", "%"+query+"%", "%"+query+"%")
+		rows, err = db.Query("SELECT id, title, COALESCE(description, '') FROM recipes WHERE title LIKE ? OR description LIKE ? LIMIT 20", "%"+query+"%", "%"+query+"%")
 	} else {
-		rows, err = db.Query("SELECT id, title, description FROM recipes ORDER BY created_at DESC LIMIT 10")
+		rows, err = db.Query("SELECT id, title, COALESCE(description, '') FROM recipes ORDER BY created_at DESC LIMIT 10")
 	}
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func SearchRecipesScoped(db *sql.DB, query string, userID int, scope string) ([]
 	var rows *sql.Rows
 	var err error
 
-	sql := "SELECT id, title, description FROM recipes WHERE (title LIKE ? OR description LIKE ?)"
+	sql := "SELECT id, title, COALESCE(description, '') FROM recipes WHERE (title LIKE ? OR description LIKE ?)"
 	args := []interface{}{"%" + query + "%", "%" + query + "%"}
 
 	if scope == "my" {
@@ -175,14 +175,14 @@ type RecipeFull struct {
 	TotalProtein  float64
 	TotalFat      float64
 	TotalCarbs    float64
-	TotalFiber    float64
-	TotalSodium   float64
+	// TotalFiber    float64 // Removed due to no such column
+	// TotalSodium   float64 // Removed due to no such column
 }
 
 // GetRecipeByID はレシピの全情報を取得します
 func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 	var r RecipeFull
-	err := db.QueryRow("SELECT id, user_id, title, description FROM recipes WHERE id = ?", id).Scan(&r.ID, &r.UserID, &r.Title, &r.Description)
+	err := db.QueryRow("SELECT id, user_id, title, COALESCE(description, '') FROM recipes WHERE id = ?", id).Scan(&r.ID, &r.UserID, &r.Title, &r.Description)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
@@ -191,9 +191,9 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 
 	// 材料の取得 (foodsテーブルと結合して名称を取得)
 	rows, err := db.Query(`
-		SELECT f.food_id, f.name, ri.quantity, ri.group_name,
-		       COALESCE(f.enerc_kcal, 0), COALESCE(f.prot_, 0), COALESCE(f.fat_, 0), 
-		       COALESCE(f.chocdf_, 0), COALESCE(f.fibtg_, 0), COALESCE(f.na_, 0)
+		SELECT f.food_id, f.name, ri.quantity, COALESCE(ri.group_name, ''),
+		       COALESCE(f.enerc_kcal, 0), COALESCE(f.prot_, 0), COALESCE(f.fat_, 0),
+		       COALESCE(f.chocdf_, 0)
 		FROM recipe_ingredients ri 
 		JOIN foods f ON ri.food_id = f.food_id 
 		WHERE ri.recipe_id = ?`, id)
@@ -203,8 +203,8 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var ing RecipeIngredientDetail
-		var kcal, prot, fat, carb, fiber, sodium float64
-		rows.Scan(&ing.FoodID, &ing.Name, &ing.Quantity, &ing.GroupName, &kcal, &prot, &fat, &carb, &fiber, &sodium)
+		var kcal, prot, fat, carb float64
+		rows.Scan(&ing.FoodID, &ing.Name, &ing.Quantity, &ing.GroupName, &kcal, &prot, &fat, &carb)
 		r.Ingredients = append(r.Ingredients, ing)
 
 		// 合計栄養素の計算 (食品データは100gあたりの値)
@@ -212,12 +212,10 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 		r.TotalProtein += (prot * ing.Quantity / 100.0)
 		r.TotalFat += (fat * ing.Quantity / 100.0)
 		r.TotalCarbs += (carb * ing.Quantity / 100.0)
-		r.TotalFiber += (fiber * ing.Quantity / 100.0)
-		r.TotalSodium += (sodium * ing.Quantity / 100.0)
 	}
 
 	// 工程の取得
-	rows, err = db.Query("SELECT step_number, instruction FROM recipe_steps WHERE recipe_id = ? ORDER BY step_number ASC", id)
+	rows, err = db.Query("SELECT step_number, COALESCE(instruction, '') FROM recipe_steps WHERE recipe_id = ? ORDER BY step_number ASC", id)
 	if err != nil {
 		return nil, err
 	}
@@ -300,4 +298,49 @@ func GetDailyCalories(db *sql.DB, userID int, date string) (float64, error) {
 		return 0, err
 	}
 	return total.Float64, nil
+}
+
+// GetMealTypeNutrition は指定したユーザー、日付、食事区分の合計栄養素を取得します
+func GetMealTypeNutrition(db *sql.DB, userID int, date, mealType string) (*RecipeFull, error) {
+	var totalNutrition RecipeFull
+	totalNutrition.Title = mealType
+
+	query := `
+		SELECT
+			SUM(COALESCE(f.enerc_kcal, 0) * ri.quantity / 100.0),
+			SUM(COALESCE(f.prot_, 0) * ri.quantity / 100.0),
+			SUM(COALESCE(f.fat_, 0) * ri.quantity / 100.0),
+			SUM(COALESCE(f.chocdf_, 0) * ri.quantity / 100.0)
+		FROM calendar_entries ce
+		JOIN recipe_ingredients ri ON ce.recipe_id = ri.recipe_id
+		JOIN foods f ON ri.food_id = f.food_id
+		WHERE ce.user_id = ? AND ce.entry_date = ? AND ce.meal_type = ?`
+
+	var totalCalories, totalProtein, totalFat, totalCarbs sql.NullFloat64
+
+	err := db.QueryRow(query, userID, date, mealType).Scan(
+		&totalCalories, &totalProtein, &totalFat, &totalCarbs,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	totalNutrition.TotalCalories = totalCalories.Float64
+	totalNutrition.TotalProtein = totalProtein.Float64
+	totalNutrition.TotalFat = totalFat.Float64
+	totalNutrition.TotalCarbs = totalCarbs.Float64
+
+	return &totalNutrition, nil
+}
+
+// GetDailyHealthData は指定したユーザーと日付の歩数と消費カロリーを取得します
+func GetDailyHealthData(db *sql.DB, userID int, date string) (int, int, bool) {
+	var steps, calories int
+	var isSynced bool
+	query := "SELECT steps, burned_calories, is_synced FROM daily_health_data WHERE user_id = ? AND date = ?"
+	err := db.QueryRow(query, userID, date).Scan(&steps, &calories, &isSynced)
+	if err != nil {
+		return 0, 0, false
+	}
+	return steps, calories, isSynced
 }

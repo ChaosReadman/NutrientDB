@@ -83,6 +83,7 @@ func main() {
 	// calendar_entries に is_synced カラムを追加 (存在しない場合)
 	// SQLiteでは同一ステートメントでのIF NOT EXISTSカラム追加が難しいためExecで試行
 	_, _ = db.Exec("ALTER TABLE calendar_entries ADD COLUMN is_synced INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN fit_data_source_id TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE daily_health_data ADD COLUMN is_synced INTEGER DEFAULT 0")
 
 	// ハンドラの初期化
@@ -116,9 +117,13 @@ func main() {
 	// レシピ操作
 	app.Get("/recipe/new", authRequired, foodHandler.NewRecipe)
 	app.Post("/recipe/create", authRequired, foodHandler.CreateRecipe)
-	app.Get("/recipe/:id", authRequired, foodHandler.RecipeDetail)
-	app.Get("/recipe/:id/edit", authRequired, foodHandler.EditRecipe)
-	app.Post("/recipe/:id/update", authRequired, foodHandler.UpdateRecipe)
+
+	// 【重要】具体的なパス（/edit, /update）を先に定義する
+	app.Get("/recipe/:id<int>/edit", authRequired, foodHandler.EditRecipe)
+	app.Post("/recipe/:id<int>/update", authRequired, foodHandler.UpdateRecipe)
+
+	// 【重要】汎用的なパラメータパスは一番最後に定義する
+	app.Get("/recipe/:id<int>", authRequired, foodHandler.RecipeDetail)
 
 	// カレンダー & 健康データ
 	app.Get("/calendar", authRequired, foodHandler.CalendarIndex)

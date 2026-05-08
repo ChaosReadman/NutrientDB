@@ -6,11 +6,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -99,7 +101,7 @@ func (h *FoodHandler) AddIngredient(c *fiber.Ctx) error {
 	// 重複チェック（任意）
 	for _, item := range ingredients {
 		if item.ID == id {
-			return c.Redirect("/")
+			return c.Redirect(c.Get("Referer", "/"))
 		}
 	}
 
@@ -109,7 +111,7 @@ func (h *FoodHandler) AddIngredient(c *fiber.Ctx) error {
 	sess.Set("ingredients", string(data))
 	sess.Save()
 
-	return c.Redirect("/")
+	return c.Redirect(c.Get("Referer", "/"))
 }
 
 // SearchJSON は食品を検索し JSON 形式で返します
@@ -158,7 +160,7 @@ func (h *FoodHandler) RemoveIngredient(c *fiber.Ctx) error {
 	}
 	_ = sess.Save()
 
-	return c.Redirect("/")
+	return c.Redirect(c.Get("Referer", "/"))
 }
 
 // NewRecipe はレシピ作成画面を表示します
@@ -234,13 +236,15 @@ func (h *FoodHandler) CreateRecipe(c *fiber.Ctx) error {
 // RecipeDetail はレシピの詳細画面を表示します
 func (h *FoodHandler) RecipeDetail(c *fiber.Ctx) error {
 	id := c.Params("id")
+	log.Printf("DEBUG: RecipeDetail called with ID: %s", id)
 	sess, _ := h.Store.Get(c)
 	user := sess.Get("username")
 	ingredients := h.getIngredientsFromSession(c)
 
 	recipe, err := models.GetRecipeByID(h.DB, id)
 	if err != nil {
-		return c.Status(500).SendString(err.Error())
+		log.Println("RecipeDetail Error:", err)
+		return c.Status(500).SendString("レシピの取得に失敗しました")
 	}
 	if recipe == nil {
 		return c.Status(404).SendString("レシピが見つかりませんでした")
@@ -264,6 +268,8 @@ func (h *FoodHandler) RecipeDetail(c *fiber.Ctx) error {
 // EditRecipe はレシピの編集画面を表示します
 func (h *FoodHandler) EditRecipe(c *fiber.Ctx) error {
 	id := c.Params("id")
+	log.Printf("DEBUG: EditRecipe called with ID: %s", id)
+	query := c.Query("q")
 	sess, _ := h.Store.Get(c)
 	user := sess.Get("username")
 	userID := sess.Get("user_id").(int)
@@ -277,25 +283,39 @@ func (h *FoodHandler) EditRecipe(c *fiber.Ctx) error {
 		return c.Status(403).SendString("編集権限がありません")
 	}
 
-	// 編集時はレシピの材料をセッションの「材料リスト」に同期する
-	var ingredients []Ingredient
-	for _, ing := range recipe.Ingredients {
-		ingredients = append(ingredients, Ingredient{
-			ID:        ing.FoodID,
-			Name:      ing.Name,
-			Quantity:  ing.Quantity,
-			GroupName: ing.GroupName,
-		})
+	// セッションが空の場合、検索の有無に関わらずDBから材料をロードする
+	// これにより、検索(q=...)実行時でも材料リストが維持される
+	if sess.Get("ingredients") == nil {
+		var ingredients []Ingredient
+		for _, ing := range recipe.Ingredients {
+			ingredients = append(ingredients, Ingredient{
+				ID:        ing.FoodID,
+				Name:      ing.Name,
+				Quantity:  ing.Quantity,
+				GroupName: ing.GroupName,
+			})
+		}
+		data, _ := json.Marshal(ingredients)
+		sess.Set("ingredients", string(data))
+		_ = sess.Save()
 	}
-	data, _ := json.Marshal(ingredients)
-	sess.Set("ingredients", string(data))
-	_ = sess.Save()
+
+	var foods []models.Food
+	if query != "" {
+		var err error
+		foods, err = models.Search(h.DB, query)
+		if err != nil {
+			log.Println("Food search error in edit:", err)
+		}
+	}
 
 	return c.Render("recipe_edit", fiber.Map{
 		"Title":         "レシピ編集",
 		"User":          user,
 		"Recipe":        recipe,
-		"Ingredients":   ingredients,
+		"Foods":         foods,
+		"Query":         query,
+		"Ingredients":   h.getIngredientsFromSession(c),
 		"MyIngredients": h.getMyIngredients(c),
 		"IsRecipePage":  true,
 	})
@@ -304,6 +324,7 @@ func (h *FoodHandler) EditRecipe(c *fiber.Ctx) error {
 // UpdateRecipe はレシピを更新します
 func (h *FoodHandler) UpdateRecipe(c *fiber.Ctx) error {
 	id := c.Params("id")
+	log.Printf("DEBUG: UpdateRecipe called with ID: %s", id)
 	sess, _ := h.Store.Get(c)
 	userID := sess.Get("user_id").(int)
 
@@ -442,12 +463,17 @@ func (h *FoodHandler) CalendarIndex(c *fiber.Ctx) error {
 		log.Println("Calorie calculation error:", err)
 	}
 
+	steps, burned, healthSynced := models.GetDailyHealthData(h.DB, userID, dateStr)
+
 	return c.Render("calendar", fiber.Map{
 		"Title":                "食事カレンダー",
 		"User":                 user,
 		"Date":                 dateStr,
 		"Entries":              entries,
 		"TotalIntake":          int(totalCalories),
+		"BurnedCalories":       burned,
+		"Steps":                steps,
+		"HealthSynced":         healthSynced,
 		"HideIngredientDrawer": true, // これにより小窓が非表示になります
 		"Ingredients":          h.getIngredientsFromSession(c),
 		"MyIngredients":        h.getMyIngredients(c),
@@ -491,7 +517,7 @@ func (h *FoodHandler) AddToCalendar(c *fiber.Ctx) error {
 	// 健康データの同期フラグも落としておく
 	_, _ = h.DB.Exec("UPDATE daily_health_data SET is_synced = 0 WHERE user_id = ? AND date = ?", userID, date)
 
-	return c.Redirect("/calendar")
+	return c.Redirect("/calendar?date=" + date)
 }
 
 // RemoveFromCalendar はカレンダーから特定の食事記録を削除します
@@ -516,52 +542,60 @@ func (h *FoodHandler) RemoveFromCalendar(c *fiber.Ctx) error {
 	// 健康データの同期フラグを落とす（内容に変更があったため、再同期を促す）
 	_, _ = h.DB.Exec("UPDATE daily_health_data SET is_synced = 0 WHERE user_id = ? AND date = ?", userID, date)
 
-	return c.Redirect("/calendar?date=" + date)
+	return c.Redirect("/calendar?date=" + date) // 削除後も同じ日付のカレンダーを表示
 }
 
 // syncNutritionToFit はレシピの栄養素を Google Fit に書き込みます
 func (h *FoodHandler) syncNutritionToFit(
 	c *fiber.Ctx,
 	title string,
-	calories, protein, fat, carbs, fiber, sodium float64,
+	calories, protein, fat, carbs float64,
 	dateStr string,
 	mealType int,
 ) {
 	sess, _ := h.Store.Get(c)
+	userID := sess.Get("user_id").(int)
 	rawToken := sess.Get("oauth_token")
 	var token oauth2.Token
-	json.Unmarshal([]byte(rawToken.(string)), &token)
+	_ = json.Unmarshal([]byte(rawToken.(string)), &token)
+
+	fitDataSourceID, err := h.getOrCreateFitDataSource(userID, token)
+	if err != nil {
+		log.Printf("Fit Data Source Error: %v", err)
+		return
+	}
 
 	client := h.OAuthConfig.Client(context.Background(), &token)
-
 	t, _ := time.Parse("2006-01-02", dateStr)
-	// ナノ秒単位のタイムスタンプが必要
 	startTimeNanos := t.UnixNano()
 	endTimeNanos := t.Add(1 * time.Hour).UnixNano()
 
-	// Fit の Nutrition データ構造を作成
 	nutritionMap := map[string]float64{
-		"calories":      calories,
-		"protein":       protein,
-		"fat.total":     fat,
-		"carbs.total":   carbs,
-		"dietary_fiber": fiber,
-		"sodium":        sodium / 1000, // mg -> g
+		"calories":           calories,
+		"protein":            protein,
+		"total_fat":          fat,
+		"total_carbohydrate": carbs,
 	}
 
 	requestBody := map[string]interface{}{
-		"dataSourceId":   "derived:com.google.nutrition:com.google.android.gms:merged",
-		"minStartTimeNs": startTimeNanos,
-		"maxEndTimeNs":   endTimeNanos,
+		"dataSourceId":   fitDataSourceID,
+		"minStartTimeNs": strconv.FormatInt(startTimeNanos, 10),
+		"maxEndTimeNs":   strconv.FormatInt(endTimeNanos, 10),
 		"point": []map[string]interface{}{
 			{
-				"startTimeNanos": startTimeNanos,
-				"endTimeNanos":   endTimeNanos,
+				"startTimeNanos": strconv.FormatInt(startTimeNanos, 10),
+				"endTimeNanos":   strconv.FormatInt(endTimeNanos, 10),
 				"dataTypeName":   "com.google.nutrition",
-				"value": []map[string]interface{}{
+				"value": []map[string]interface{}{ // This is an array of Value objects
 					{"mapVal": h.formatNutritionMap(nutritionMap)},
-					{"intVal": mealType},
-					{"strVal": title},
+					{
+						"intVal": mealType,
+						"key":    "meal_type", // Add key for meal_type
+					},
+					{
+						"strVal": title,
+						"key":    "food_item", // Add key for food_item
+					},
 				},
 			},
 		},
@@ -569,18 +603,87 @@ func (h *FoodHandler) syncNutritionToFit(
 
 	jsonReq, _ := json.Marshal(requestBody)
 	// dataset:patch を使用してデータをアップロード
-	datasetID := string(startTimeNanos) + "-" + string(endTimeNanos)
-	url := "https://www.googleapis.com/fitness/v1/users/me/dataSources/derived:com.google.nutrition:com.google.android.gms:merged/datasets/" + datasetID
+	datasetID := strconv.FormatInt(startTimeNanos, 10) + "-" + strconv.FormatInt(endTimeNanos, 10) // Dataset ID must be in nanoseconds
+	url := "https://www.googleapis.com/fitness/v1/users/me/dataSources/" + fitDataSourceID + "/datasets/" + datasetID
 
-	req, _ := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonReq))
+	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonReq))
+	if err != nil {
+		log.Printf("Google Fit Nutrition Sync Error: Failed to create request: %v", err)
+		return
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Println("Google Fit Nutrition Sync Error:", err)
 	} else {
-		resp.Body.Close()
-		log.Printf("Nutritional data for '%s' synced to Google Fit. Status: %s", title, resp.Status)
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("Google Fit Sync Failed [%d]: %s", resp.StatusCode, string(body))
+		} else {
+			log.Printf("Nutritional data for '%s' synced to Google Fit. Status: %s", title, resp.Status)
+		}
+		defer resp.Body.Close()
 	}
+}
+
+// getOrCreateFitDataSource はユーザーの Google Fit データソースIDを取得または作成します
+func (h *FoodHandler) getOrCreateFitDataSource(userID int, token oauth2.Token) (string, error) {
+	// データベースからデータソースIDを検索
+	user, err := models.GetUserByID(h.DB, userID)
+	if err == nil && user != nil && user.FitDataSourceID != "" {
+		return user.FitDataSourceID, nil // 既存のIDがあればそれを使用
+	}
+	// If not found, proceed to create
+
+	// なければ新規作成
+	client := h.OAuthConfig.Client(context.Background(), &token)
+
+	// データソース作成リクエストボディ
+	createSourceBody := map[string]interface{}{
+		"dataStreamName": "RecipeApp Nutrition Data",
+		"type":           "raw",
+		"dataType": map[string]string{
+			"name": "com.google.nutrition",
+		},
+		"application": map[string]string{
+			"detailsUrl": os.Getenv("APP_BASE_URL"), // 環境変数から取得
+			"name":       "RecipeApp",
+			"version":    "1.0",
+		},
+		// "device": map[string]string{ // Google Fit API の device.type に "platform" は無効なため削除
+		// 	"manufacturer": "RecipeApp",
+		// 	"model":        "Web",
+		// 	"type":         "platform",
+		// 	"uid":          "web-app-instance-" + strconv.Itoa(userID), // ユーザーごとにユニークなID
+		// },
+	}
+
+	jsonReq, _ := json.Marshal(createSourceBody)
+	resp, err := client.Post("https://www.googleapis.com/fitness/v1/users/me/dataSources", "application/json", bytes.NewBuffer(jsonReq))
+	if err != nil {
+		return "", fmt.Errorf("failed to create Fit data source: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to create Fit data source, status: %s, body: %s", resp.Status, string(body))
+	}
+
+	var result struct {
+		DataSourceID string `json:"dataStreamId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to parse data source creation response: %w", err)
+	}
+
+	// 取得したデータソースIDをDBに保存 (usersテーブルのfit_data_source_idカラムを更新)
+	_, err = h.DB.Exec("UPDATE users SET fit_data_source_id = ? WHERE id = ?", result.DataSourceID, userID)
+	if err != nil {
+		log.Printf("Failed to save Fit data source ID for user %d: %v", userID, err)
+	}
+
+	return result.DataSourceID, nil
 }
 
 // Fit の形式（key: {fpVal: val}）に変換するヘルパー
@@ -629,26 +732,48 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 	}
 
 	// 1. 未同期の食事データを Google Fit へ送信 (Push)
-	entries, err := models.GetCalendarEntries(h.DB, userID, dateStr)
-	if err == nil {
-		for _, e := range entries {
-			if !e.IsSynced {
-				recipe, _ := models.GetRecipeByID(h.DB, string(rune(e.RecipeID)))
-				if recipe != nil {
-					fitMealType := 4 // default snack
-					switch e.MealType {
-					case "breakfast":
-						fitMealType = 1
-					case "lunch":
-						fitMealType = 2
-					case "dinner":
-						fitMealType = 3
-					}
-					h.syncNutritionToFit(c, recipe.Title, recipe.TotalCalories, recipe.TotalProtein, recipe.TotalFat, recipe.TotalCarbs, recipe.TotalFiber, recipe.TotalSodium, dateStr, fitMealType)
-				}
-				// 同期済みフラグを更新
-				_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE id = ?", e.ID)
+	mealTypes := []string{"breakfast", "lunch", "dinner", "snack"}
+	for _, mt := range mealTypes {
+		// その食事区分の合計栄養素を取得
+		nutrition, err := models.GetMealTypeNutrition(h.DB, userID, dateStr, mt)
+		if err != nil {
+			log.Printf("Error getting nutrition for meal type %s: %v", mt, err)
+			continue
+		}
+
+		// 栄養素が0でなければFitに送信
+		if nutrition.TotalCalories > 0 || nutrition.TotalProtein > 0 || nutrition.TotalFat > 0 || nutrition.TotalCarbs > 0 {
+			fitMealType := 4 // default snack
+			switch mt {
+			case "breakfast":
+				fitMealType = 1
+			case "lunch":
+				fitMealType = 2
+			case "dinner":
+				fitMealType = 3
 			}
+			h.syncNutritionToFit(
+				c,
+				mt, // 食事区分名をタイトルとして使用
+				nutrition.TotalCalories,
+				nutrition.TotalProtein,
+				nutrition.TotalFat,
+				nutrition.TotalCarbs,
+				dateStr,
+				fitMealType,
+			)
+			// その食事区分の全エントリを同期済みとしてマーク
+			_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE user_id = ? AND entry_date = ? AND meal_type = ?", userID, dateStr, mt)
+		} else {
+			// 栄養素が0の場合は、Fitからその食事区分のデータを削除する（PATCHで0を送信する）
+			// ただし、Fit APIのPATCHは指定範囲のデータポイントを上書きするため、
+			// 0のデータポイントを送信することで実質的に削除と同じ効果が得られる
+			// ここでは、栄養素が0の場合はFitに何も送信しないことで、Fit側のデータが残る可能性がある。
+			// 明示的に削除したい場合は、0のデータポイントを送信するロジックが必要だが、
+			// FitのUIで非表示になるため、今回はスキップ。
+			// もしFitから完全に消したい場合は、0の栄養素でsyncNutritionToFitを呼ぶ必要がある。
+			// 今回は、未同期フラグを立てないことで、次回同期時に再度Fitに送信されないようにする。
+			_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE user_id = ? AND entry_date = ? AND meal_type = ?", userID, dateStr, mt)
 		}
 	}
 
