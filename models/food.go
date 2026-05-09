@@ -172,6 +172,7 @@ type RecipeFull struct {
 	Ingredients   []RecipeIngredientDetail
 	Steps         []RecipeStepDetail
 	TotalCalories float64
+	EntryTime     string
 	TotalProtein  float64
 	TotalFat      float64
 	TotalCarbs    float64
@@ -235,13 +236,14 @@ type CalendarEntryDetail struct {
 	Title     string
 	MealType  string
 	EntryDate string
+	EntryTime string
 	IsSynced  bool
 }
 
 // GetCalendarEntries は指定したユーザーと日付の食事記録を取得します
 func GetCalendarEntries(db *sql.DB, userID int, date string) ([]CalendarEntryDetail, error) {
 	query := `
-		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, DATE(ce.entry_date), ce.is_synced
+		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, DATE(ce.entry_date), COALESCE(ce.entry_time, '00:00'), ce.is_synced
 		FROM calendar_entries ce
 		JOIN recipes r ON ce.recipe_id = r.id
 		WHERE ce.user_id = ? AND date(ce.entry_date) = ?
@@ -260,7 +262,7 @@ func GetCalendarEntries(db *sql.DB, userID int, date string) ([]CalendarEntryDet
 	var entries []CalendarEntryDetail
 	for rows.Next() {
 		var e CalendarEntryDetail
-		rows.Scan(&e.ID, &e.RecipeID, &e.Title, &e.MealType, &e.EntryDate, &e.IsSynced)
+		rows.Scan(&e.ID, &e.RecipeID, &e.Title, &e.MealType, &e.EntryDate, &e.EntryTime, &e.IsSynced)
 		entries = append(entries, e)
 	}
 	return entries, nil
@@ -324,6 +326,7 @@ func GetMealTypeNutrition(db *sql.DB, userID int, date, mealType string) (*Recip
 
 	query := `
 		SELECT
+			MAX(COALESCE(ce.entry_time, '00:00')),
 			SUM(COALESCE(f.enerc_kcal, 0) * ri.quantity / 100.0),
 			SUM(COALESCE(f.prot_, 0) * ri.quantity / 100.0),
 			SUM(COALESCE(f.fat_, 0) * ri.quantity / 100.0),
@@ -334,14 +337,16 @@ func GetMealTypeNutrition(db *sql.DB, userID int, date, mealType string) (*Recip
 		WHERE ce.user_id = ? AND date(ce.entry_date) = ? AND ce.meal_type = ?`
 
 	var totalCalories, totalProtein, totalFat, totalCarbs sql.NullFloat64
+	var entryTime string
 
 	err := db.QueryRow(query, userID, date, mealType).Scan(
-		&totalCalories, &totalProtein, &totalFat, &totalCarbs,
+		&entryTime, &totalCalories, &totalProtein, &totalFat, &totalCarbs,
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	totalNutrition.EntryTime = entryTime
 	totalNutrition.TotalCalories = totalCalories.Float64
 	totalNutrition.TotalProtein = totalProtein.Float64
 	totalNutrition.TotalFat = totalFat.Float64

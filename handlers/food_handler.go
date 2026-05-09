@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -284,6 +285,15 @@ func (h *FoodHandler) EditRecipe(c *fiber.Ctx) error {
 		return c.Status(403).SendString("編集権限がありません")
 	}
 
+	// 検索クエリがある場合は食品を検索
+	var foods []models.Food
+	if query != "" {
+		foods, err = models.Search(h.DB, query)
+		if err != nil {
+			log.Println("Food search error in edit:", err)
+		}
+	}
+
 	// セッションが空の場合、検索の有無に関わらずDBから材料をロードする
 	// これにより、検索(q=...)実行時でも材料リストが維持される
 	if sess.Get("ingredients") == nil {
@@ -299,15 +309,6 @@ func (h *FoodHandler) EditRecipe(c *fiber.Ctx) error {
 		data, _ := json.Marshal(ingredients)
 		sess.Set("ingredients", string(data))
 		_ = sess.Save()
-	}
-
-	var foods []models.Food
-	if query != "" {
-		var err error
-		foods, err = models.Search(h.DB, query)
-		if err != nil {
-			log.Println("Food search error in edit:", err)
-		}
 	}
 
 	return c.Render("recipe_edit", fiber.Map{
@@ -489,8 +490,9 @@ func (h *FoodHandler) AddToCalendar(c *fiber.Ctx) error {
 		return c.Redirect("/login")
 	}
 
-	mealType := c.FormValue("meal_type") // breakfast, lunch, dinner
-	date := c.FormValue("date")          // YYYY-MM-DD
+	mealType := c.FormValue("meal_type")   // breakfast, lunch, dinner
+	date := c.FormValue("date")            // YYYY-MM-DD
+	entryTime := c.FormValue("entry_time") // HH:mm
 
 	// 複数の recipe_ids を取得
 	recipeIDs := c.Request().PostArgs().PeekMulti("recipe_ids")
@@ -505,8 +507,8 @@ func (h *FoodHandler) AddToCalendar(c *fiber.Ctx) error {
 
 	for _, idByte := range recipeIDs {
 		recipeID := string(idByte)
-		_, err := tx.Exec("INSERT INTO calendar_entries (user_id, recipe_id, entry_date, meal_type, is_synced) VALUES (?, ?, ?, ?, 0)",
-			userID, recipeID, date, mealType)
+		_, err := tx.Exec("INSERT INTO calendar_entries (user_id, recipe_id, entry_date, entry_time, meal_type, is_synced) VALUES (?, ?, ?, ?, ?, 0)",
+			userID, recipeID, date, entryTime, mealType)
 		if err != nil {
 			tx.Rollback()
 			log.Println("Calendar insert error:", err)
@@ -552,6 +554,7 @@ func (h *FoodHandler) syncNutritionToFit(
 	title string,
 	calories, protein, fat, carbs float64,
 	dateStr string,
+	timeStr string,
 	mealType int,
 ) {
 	sess, _ := h.Store.Get(c)
@@ -575,20 +578,9 @@ func (h *FoodHandler) syncNutritionToFit(
 	if len(dateStr) > 10 {
 		cleanDate = dateStr[:10]
 	}
-	t, _ := time.ParseInLocation("2006-01-02", cleanDate, jst)
 
-	// 食事区分に応じて時間をずらす (JST基準)
-	hour := 15 // デフォルト (Snack: 15:00)
-	switch mealType {
-	case 1:
-		hour = 9 // Breakfast: 09:00
-	case 2:
-		hour = 13 // Lunch: 13:00
-	case 3:
-		hour = 19 // Dinner: 19:00
-	}
-
-	startTime := time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, jst)
+	// 保存された時刻を使用して開始時間を計算
+	startTime, _ := time.ParseInLocation("2006-01-02 15:04", cleanDate+" "+timeStr, jst)
 	startTimeNanos := startTime.UnixNano()
 	endTimeNanos := startTime.Add(1 * time.Hour).UnixNano()
 
@@ -634,6 +626,7 @@ func (h *FoodHandler) syncNutritionToFit(
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	log.Printf("DEBUG: Patching nutrition to Fit for '%s' (%.2f kcal)...", title, calories)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Println("Google Fit Nutrition Sync Error:", err)
@@ -642,7 +635,7 @@ func (h *FoodHandler) syncNutritionToFit(
 			body, _ := io.ReadAll(resp.Body)
 			log.Printf("Google Fit Sync Failed [%d]: %s", resp.StatusCode, string(body))
 		} else {
-			log.Printf("Nutritional data for '%s' synced to Google Fit. Status: %s", title, resp.Status)
+			log.Printf("SUCCESS: Nutritional data for '%s' synced. Status: %s", title, resp.Status)
 		}
 		defer resp.Body.Close()
 	}
@@ -747,81 +740,13 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 	}
 	userID := sess.Get("user_id").(int)
 
-	// 同期対象の日付を取得
+	// 1. 準備：同期対象の日付とタイムゾーンの設定
 	dateStr := c.Query("date")
 	if dateStr == "" {
 		dateStr = time.Now().Format("2006-01-02")
 	}
+	log.Printf("DEBUG: SyncHealthData started for %s", dateStr)
 
-	// 1. 未同期の食事データを Google Fit へ送信 (Push)
-	mealTypes := []string{"breakfast", "lunch", "dinner", "snack"}
-	for _, mt := range mealTypes {
-		// その食事区分の合計栄養素を取得
-		nutrition, err := models.GetMealTypeNutrition(h.DB, userID, dateStr, mt)
-		if err != nil {
-			log.Printf("Error getting nutrition for meal type %s: %v", mt, err)
-			continue
-		}
-
-		// 栄養素が0でなければFitに送信
-		if nutrition.TotalCalories > 0 || nutrition.TotalProtein > 0 || nutrition.TotalFat > 0 || nutrition.TotalCarbs > 0 {
-			fitMealType := 4 // default snack
-			switch mt {
-			case "breakfast":
-				fitMealType = 1
-			case "lunch":
-				fitMealType = 2
-			case "dinner":
-				fitMealType = 3
-			}
-
-			// その食事区分の全レシピタイトルを取得して連結
-			var titles []string
-			tRows, _ := h.DB.Query("SELECT r.title FROM calendar_entries ce JOIN recipes r ON ce.recipe_id = r.id WHERE ce.user_id = ? AND date(ce.entry_date) = ? AND ce.meal_type = ?", userID, dateStr, mt)
-			for tRows.Next() {
-				var tTitle string
-				tRows.Scan(&tTitle)
-				titles = append(titles, tTitle)
-			}
-			tRows.Close()
-			combinedTitle := strings.Join(titles, ", ")
-			if combinedTitle == "" {
-				combinedTitle = mt
-			}
-
-			h.syncNutritionToFit(
-				c,
-				combinedTitle, // 連結したレシピ名（卵かけご飯 等）を使用
-				nutrition.TotalCalories,
-				nutrition.TotalProtein,
-				nutrition.TotalFat,
-				nutrition.TotalCarbs,
-				dateStr,
-				fitMealType,
-			)
-			// その食事区分の全エントリを同期済みとしてマーク
-			_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE user_id = ? AND entry_date = ? AND meal_type = ?", userID, dateStr, mt)
-		} else {
-			// 栄養素が0の場合は、Fitからその食事区分のデータを削除する（PATCHで0を送信する）
-			// ただし、Fit APIのPATCHは指定範囲のデータポイントを上書きするため、
-			// 0のデータポイントを送信することで実質的に削除と同じ効果が得られる
-			// ここでは、栄養素が0の場合はFitに何も送信しないことで、Fit側のデータが残る可能性がある。
-			// 明示的に削除したい場合は、0のデータポイントを送信するロジックが必要だが、
-			// FitのUIで非表示になるため、今回はスキップ。
-			// もしFitから完全に消したい場合は、0の栄養素でsyncNutritionToFitを呼ぶ必要がある。
-			// 今回は、未同期フラグを立てないことで、次回同期時に再度Fitに送信されないようにする。
-			_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE user_id = ? AND entry_date = ? AND meal_type = ?", userID, dateStr, mt)
-		}
-	}
-
-	var token oauth2.Token
-	if err := json.Unmarshal([]byte(rawToken.(string)), &token); err != nil {
-		return c.Status(500).SendString("トークンの解析に失敗しました")
-	}
-
-	mySourceID, _ := h.getOrCreateFitDataSource(userID, token)
-
-	// 2. Google Fit から活動データを取得 (Pull)
 	jst := time.FixedZone("Asia/Tokyo", 9*60*60)
 	cleanDate := dateStr
 	if len(dateStr) > 10 {
@@ -831,15 +756,44 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 	startTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, jst)
 	endTime := startTime.Add(24 * time.Hour).Add(-time.Nanosecond)
 
+	var token oauth2.Token
+	if err := json.Unmarshal([]byte(rawToken.(string)), &token); err != nil {
+		return c.Status(500).SendString("トークンの解析に失敗しました")
+	}
+
+	mySourceID, _ := h.getOrCreateFitDataSource(userID, token)
+
+	// 1. SQLite 側の現在の食事データを「判定用」に準備
+	type mealExpectation struct {
+		mealTypeStr string
+		calories    float64
+		startTimeNs int64
+		foundInFit  bool
+	}
+	expectedMeals := []mealExpectation{}
+	for _, mt := range []string{"breakfast", "lunch", "dinner", "snack"} {
+		nut, _ := models.GetMealTypeNutrition(h.DB, userID, cleanDate, mt)
+		if nut != nil && nut.TotalCalories > 0 {
+			sTime, _ := time.ParseInLocation("2006-01-02 15:04", cleanDate+" "+nut.EntryTime, jst)
+			expectedMeals = append(expectedMeals, mealExpectation{
+				mealTypeStr: mt,
+				calories:    nut.TotalCalories,
+				startTimeNs: sTime.UnixNano(),
+			})
+		}
+	}
+
+	// 2. 受信 (Pull) & 外部データ特定
 	client := h.OAuthConfig.Client(context.Background(), &token)
 
+	// 活動量（歩数・消費カロリー）の集計
 	requestBody := map[string]interface{}{
 		"aggregateBy": []map[string]interface{}{
 			{"dataTypeName": "com.google.step_count.delta"},
 			{"dataTypeName": "com.google.calories.expended"},
 			{"dataTypeName": "com.google.nutrition"},
 		},
-		"bucketByTime":    map[string]interface{}{"durationMillis": 86400000}, // 1日分
+		"bucketByTime":    map[string]interface{}{"durationMillis": 86400000},
 		"startTimeMillis": startTime.UnixNano() / int64(time.Millisecond),
 		"endTimeMillis":   endTime.UnixNano() / int64(time.Millisecond),
 	}
@@ -862,16 +816,9 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 		Bucket []struct {
 			Dataset []struct {
 				Point []struct {
-					OriginDataSourceId string `json:"originDataSourceId"`
-					Value              []struct {
+					Value []struct {
 						IntVal int     `json:"intVal"`
 						FpVal  float64 `json:"fpVal"`
-						MapVal []struct {
-							Key   string `json:"key"`
-							Value struct {
-								FpVal float64 `json:"fpVal"`
-							} `json:"value"`
-						} `json:"mapVal"`
 					} `json:"value"`
 				} `json:"point"`
 			} `json:"dataset"`
@@ -888,25 +835,64 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 
 	// 取得したバケットから歩数とカロリーを抽出
 	if len(fitData.Bucket) > 0 {
-		for i, ds := range fitData.Bucket[0].Dataset {
+		for _, ds := range fitData.Bucket[0].Dataset {
 			for _, p := range ds.Point {
-				isMyData := p.OriginDataSourceId == mySourceID || (mySourceID != "" && strings.Contains(p.OriginDataSourceId, "RecipeApp"))
-
 				for _, v := range p.Value {
-					if i == 0 && v.IntVal > 0 { // steps
+					// 歩数は intVal、カロリーは fpVal に格納される
+					if v.IntVal > 0 {
 						steps += v.IntVal
 					}
-					if i == 1 && v.FpVal > 0 { // burned calories
+					if v.FpVal > 0 {
 						calories += v.FpVal
 					}
-					if i == 2 && !isMyData { // external nutrition
-						for _, mv := range v.MapVal {
-							if mv.Key == "calories" {
-								externalCalories += mv.Value.FpVal
-							}
-						}
+				}
+			}
+		}
+	}
+
+	// 栄養素の詳細比較（重複排除ロジック）
+	rawNutritionURL := fmt.Sprintf("https://www.googleapis.com/fitness/v1/users/me/dataSources/derived:com.google.nutrition:com.google.android.gms:merged/datasets/%d-%d", startTime.UnixNano(), endTime.UnixNano())
+	rawResp, err := client.Get(rawNutritionURL)
+	if err == nil && rawResp.StatusCode == 200 {
+		var rawData struct {
+			Point []struct {
+				StartTimeNanos     string `json:"startTimeNanos"`
+				OriginDataSourceId string `json:"originDataSourceId"`
+				Value              []struct {
+					MapVal []struct {
+						Key   string `json:"key"`
+						Value struct {
+							FpVal float64 `json:"fpVal"`
+						} `json:"value"`
+					} `json:"mapVal"`
+				} `json:"value"`
+			} `json:"point"`
+		}
+		json.NewDecoder(rawResp.Body).Decode(&rawData)
+		rawResp.Body.Close()
+
+		for _, p := range rawData.Point {
+			pStart, _ := strconv.ParseInt(p.StartTimeNanos, 10, 64)
+			isMyData := p.OriginDataSourceId == mySourceID || (mySourceID != "" && strings.Contains(p.OriginDataSourceId, "RecipeApp"))
+
+			pCal := 0.0
+			for _, v := range p.Value {
+				for _, mv := range v.MapVal {
+					if mv.Key == "calories" {
+						pCal = mv.Value.FpVal
 					}
 				}
+			}
+			matched := false
+			for idx, exp := range expectedMeals {
+				if exp.startTimeNs == pStart && math.Abs(exp.calories-pCal) < 0.1 {
+					expectedMeals[idx].foundInFit = true
+					matched = true
+					break
+				}
+			}
+			if !matched && !isMyData && pCal > 0 {
+				externalCalories += pCal
 			}
 		}
 	}
@@ -914,9 +900,42 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 	// 取得した活動データをDBに保存
 	_, _ = h.DB.Exec(`INSERT INTO daily_health_data (user_id, date, steps, burned_calories, external_intake_calories, is_synced) 
 		VALUES (?, ?, ?, ?, ?, 1) 
-		ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories, 
-		external_intake_calories=excluded.external_intake_calories, is_synced=1`,
-		userID, dateStr, steps, int(calories), int(externalCalories))
+		ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories, external_intake_calories=excluded.external_intake_calories, is_synced=1`,
+		userID, cleanDate, steps, int(calories), int(externalCalories))
+
+	// 3. 送信 (Push)：Fit に存在しなかった差分のみを送信
+	for _, exp := range expectedMeals {
+		if !exp.foundInFit {
+			log.Printf("DEBUG: Sync target found - %s (%.2f kcal)", exp.mealTypeStr, exp.calories)
+			nutrition, _ := models.GetMealTypeNutrition(h.DB, userID, cleanDate, exp.mealTypeStr)
+			fitMT := 4
+			switch exp.mealTypeStr {
+			case "breakfast":
+				fitMT = 1
+			case "lunch":
+				fitMT = 2
+			case "dinner":
+				fitMT = 3
+			}
+
+			// その食事区分の全レシピタイトルを取得して連結 (例: "トースト２枚, 目玉焼き")
+			var titles []string
+			tRows, _ := h.DB.Query("SELECT r.title FROM calendar_entries ce JOIN recipes r ON ce.recipe_id = r.id WHERE ce.user_id = ? AND date(ce.entry_date) = ? AND ce.meal_type = ?", userID, cleanDate, exp.mealTypeStr)
+			for tRows.Next() {
+				var tTitle string
+				tRows.Scan(&tTitle)
+				titles = append(titles, tTitle)
+			}
+			tRows.Close()
+			combinedTitle := strings.Join(titles, ", ")
+			if combinedTitle == "" {
+				combinedTitle = exp.mealTypeStr
+			}
+
+			h.syncNutritionToFit(c, combinedTitle, nutrition.TotalCalories, nutrition.TotalProtein, nutrition.TotalFat, nutrition.TotalCarbs, cleanDate, nutrition.EntryTime, fitMT)
+			_, _ = h.DB.Exec("UPDATE calendar_entries SET is_synced = 1 WHERE user_id = ? AND date(entry_date) = ? AND meal_type = ?", userID, cleanDate, exp.mealTypeStr)
+		}
+	}
 
 	return c.Redirect("/calendar?date=" + dateStr)
 }

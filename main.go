@@ -84,6 +84,7 @@ func main() {
 	// calendar_entries に is_synced カラムを追加 (存在しない場合)
 	// SQLiteでは同一ステートメントでのIF NOT EXISTSカラム追加が難しいためExecで試行
 	_, _ = db.Exec("ALTER TABLE calendar_entries ADD COLUMN is_synced INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE calendar_entries ADD COLUMN entry_time TEXT DEFAULT '00:00'")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN fit_data_source_id TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE daily_health_data ADD COLUMN is_synced INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE daily_health_data ADD COLUMN external_intake_calories INTEGER DEFAULT 0")
