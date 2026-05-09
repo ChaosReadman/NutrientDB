@@ -175,8 +175,8 @@ type RecipeFull struct {
 	TotalProtein  float64
 	TotalFat      float64
 	TotalCarbs    float64
-	// TotalFiber    float64 // Removed due to no such column
-	// TotalSodium   float64 // Removed due to no such column
+	TotalFiber    float64
+	TotalSodium   float64
 }
 
 // GetRecipeByID はレシピの全情報を取得します
@@ -192,7 +192,7 @@ func GetRecipeByID(db *sql.DB, id string) (*RecipeFull, error) {
 	// 材料の取得 (foodsテーブルと結合して名称を取得)
 	rows, err := db.Query(`
 		SELECT f.food_id, f.name, ri.quantity, COALESCE(ri.group_name, ''),
-		       COALESCE(f.enerc_kcal, 0), COALESCE(f.prot_, 0), COALESCE(f.fat_, 0),
+		       COALESCE(f.enerc_kcal, 0), COALESCE(f.prot_, 0), COALESCE(f.fat_, 0), 
 		       COALESCE(f.chocdf_, 0)
 		FROM recipe_ingredients ri 
 		JOIN foods f ON ri.food_id = f.food_id 
@@ -241,10 +241,10 @@ type CalendarEntryDetail struct {
 // GetCalendarEntries は指定したユーザーと日付の食事記録を取得します
 func GetCalendarEntries(db *sql.DB, userID int, date string) ([]CalendarEntryDetail, error) {
 	query := `
-		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, ce.entry_date, ce.is_synced
+		SELECT ce.id, ce.recipe_id, r.title, ce.meal_type, DATE(ce.entry_date), ce.is_synced
 		FROM calendar_entries ce
 		JOIN recipes r ON ce.recipe_id = r.id
-		WHERE ce.user_id = ? AND ce.entry_date = ?
+		WHERE ce.user_id = ? AND date(ce.entry_date) = ?
 		ORDER BY CASE ce.meal_type 
 			WHEN 'breakfast' THEN 1 
 			WHEN 'lunch' THEN 2 
@@ -284,20 +284,37 @@ func GetUserRecipes(db *sql.DB, userID int) ([]map[string]interface{}, error) {
 }
 
 // GetDailyCalories は指定したユーザーと日付の合計摂取カロリーを計算します
-func GetDailyCalories(db *sql.DB, userID int, date string) (float64, error) {
+func GetDailyCalories(db *sql.DB, userID int, date string) (float64, int, error) {
 	query := `
 		SELECT SUM(f.enerc_kcal * ri.quantity / 100.0)
 		FROM calendar_entries ce
 		JOIN recipe_ingredients ri ON ce.recipe_id = ri.recipe_id
 		JOIN foods f ON ri.food_id = f.food_id
-		WHERE ce.user_id = ? AND ce.entry_date = ?`
+		WHERE ce.user_id = ? AND date(ce.entry_date) = ?`
 
-	var total sql.NullFloat64
-	err := db.QueryRow(query, userID, date).Scan(&total)
+	var managedTotal sql.NullFloat64
+	err := db.QueryRow(query, userID, date).Scan(&managedTotal)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return total.Float64, nil
+
+	var external int
+	db.QueryRow("SELECT external_intake_calories FROM daily_health_data WHERE user_id = ? AND date(date) = ?", userID, date).Scan(&external)
+
+	return managedTotal.Float64, external, nil
+}
+
+// GetDailyHealthData は指定したユーザーと日付の歩数と消費カロリーを取得します
+func GetDailyHealthData(db *sql.DB, userID int, date string) (int, int, bool) {
+	var steps, calories int
+	var isSynced bool
+	query := "SELECT steps, burned_calories, is_synced FROM daily_health_data WHERE user_id = ? AND date(date) = ?"
+	err := db.QueryRow(query, userID, date).Scan(&steps, &calories, &isSynced)
+	if err != nil {
+		// データがない場合は 0 を返す
+		return 0, 0, false
+	}
+	return steps, calories, isSynced
 }
 
 // GetMealTypeNutrition は指定したユーザー、日付、食事区分の合計栄養素を取得します
@@ -314,7 +331,7 @@ func GetMealTypeNutrition(db *sql.DB, userID int, date, mealType string) (*Recip
 		FROM calendar_entries ce
 		JOIN recipe_ingredients ri ON ce.recipe_id = ri.recipe_id
 		JOIN foods f ON ri.food_id = f.food_id
-		WHERE ce.user_id = ? AND ce.entry_date = ? AND ce.meal_type = ?`
+		WHERE ce.user_id = ? AND date(ce.entry_date) = ? AND ce.meal_type = ?`
 
 	var totalCalories, totalProtein, totalFat, totalCarbs sql.NullFloat64
 
@@ -331,16 +348,4 @@ func GetMealTypeNutrition(db *sql.DB, userID int, date, mealType string) (*Recip
 	totalNutrition.TotalCarbs = totalCarbs.Float64
 
 	return &totalNutrition, nil
-}
-
-// GetDailyHealthData は指定したユーザーと日付の歩数と消費カロリーを取得します
-func GetDailyHealthData(db *sql.DB, userID int, date string) (int, int, bool) {
-	var steps, calories int
-	var isSynced bool
-	query := "SELECT steps, burned_calories, is_synced FROM daily_health_data WHERE user_id = ? AND date = ?"
-	err := db.QueryRow(query, userID, date).Scan(&steps, &calories, &isSynced)
-	if err != nil {
-		return 0, 0, false
-	}
-	return steps, calories, isSynced
 }

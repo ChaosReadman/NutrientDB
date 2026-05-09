@@ -74,6 +74,7 @@ func main() {
 		date TEXT NOT NULL,
 		steps INTEGER DEFAULT 0,
 		burned_calories INTEGER DEFAULT 0,
+		external_intake_calories INTEGER DEFAULT 0,
 		PRIMARY KEY (user_id, date)
 	);`)
 	if err != nil {
@@ -85,6 +86,7 @@ func main() {
 	_, _ = db.Exec("ALTER TABLE calendar_entries ADD COLUMN is_synced INTEGER DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE users ADD COLUMN fit_data_source_id TEXT DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE daily_health_data ADD COLUMN is_synced INTEGER DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE daily_health_data ADD COLUMN external_intake_calories INTEGER DEFAULT 0")
 
 	// ハンドラの初期化
 	foodHandler := &handlers.FoodHandler{DB: db, Store: store, OAuthConfig: conf}

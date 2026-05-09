@@ -13,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -458,7 +459,7 @@ func (h *FoodHandler) CalendarIndex(c *fiber.Ctx) error {
 		return c.Status(500).SendString(err.Error())
 	}
 
-	totalCalories, err := models.GetDailyCalories(h.DB, userID, dateStr)
+	totalCalories, externalCalories, err := models.GetDailyCalories(h.DB, userID, dateStr)
 	if err != nil {
 		log.Println("Calorie calculation error:", err)
 	}
@@ -470,7 +471,7 @@ func (h *FoodHandler) CalendarIndex(c *fiber.Ctx) error {
 		"User":                 user,
 		"Date":                 dateStr,
 		"Entries":              entries,
-		"TotalIntake":          int(totalCalories),
+		"TotalIntake":          int(totalCalories) + externalCalories,
 		"BurnedCalories":       burned,
 		"Steps":                steps,
 		"HealthSynced":         healthSynced,
@@ -531,7 +532,7 @@ func (h *FoodHandler) RemoveFromCalendar(c *fiber.Ctx) error {
 
 	// 日付を取得しておく（リダイレクトと同期フラグ更新用）
 	var date string
-	err := h.DB.QueryRow("SELECT entry_date FROM calendar_entries WHERE id = ? AND user_id = ?", id, userID).Scan(&date)
+	err := h.DB.QueryRow("SELECT DATE(entry_date) FROM calendar_entries WHERE id = ? AND user_id = ?", id, userID).Scan(&date)
 	if err != nil {
 		return c.Redirect("/calendar")
 	}
@@ -566,9 +567,30 @@ func (h *FoodHandler) syncNutritionToFit(
 	}
 
 	client := h.OAuthConfig.Client(context.Background(), &token)
-	t, _ := time.Parse("2006-01-02", dateStr)
-	startTimeNanos := t.UnixNano()
-	endTimeNanos := t.Add(1 * time.Hour).UnixNano()
+
+	// 日本時間 (JST) として日付を解析
+	jst := time.FixedZone("Asia/Tokyo", 9*60*60)
+	// dateStrに時刻が含まれている場合に備え、先頭10文字(YYYY-MM-DD)のみ使用
+	cleanDate := dateStr
+	if len(dateStr) > 10 {
+		cleanDate = dateStr[:10]
+	}
+	t, _ := time.ParseInLocation("2006-01-02", cleanDate, jst)
+
+	// 食事区分に応じて時間をずらす (JST基準)
+	hour := 15 // デフォルト (Snack: 15:00)
+	switch mealType {
+	case 1:
+		hour = 9 // Breakfast: 09:00
+	case 2:
+		hour = 13 // Lunch: 13:00
+	case 3:
+		hour = 19 // Dinner: 19:00
+	}
+
+	startTime := time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, jst)
+	startTimeNanos := startTime.UnixNano()
+	endTimeNanos := startTime.Add(1 * time.Hour).UnixNano()
 
 	nutritionMap := map[string]float64{
 		"calories":           calories,
@@ -593,8 +615,8 @@ func (h *FoodHandler) syncNutritionToFit(
 						"key":    "meal_type", // Add key for meal_type
 					},
 					{
-						"strVal": title,
-						"key":    "food_item", // Add key for food_item
+						"stringVal": title,
+						"key":       "food_item", // Add key for food_item
 					},
 				},
 			},
@@ -752,9 +774,24 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 			case "dinner":
 				fitMealType = 3
 			}
+
+			// その食事区分の全レシピタイトルを取得して連結
+			var titles []string
+			tRows, _ := h.DB.Query("SELECT r.title FROM calendar_entries ce JOIN recipes r ON ce.recipe_id = r.id WHERE ce.user_id = ? AND date(ce.entry_date) = ? AND ce.meal_type = ?", userID, dateStr, mt)
+			for tRows.Next() {
+				var tTitle string
+				tRows.Scan(&tTitle)
+				titles = append(titles, tTitle)
+			}
+			tRows.Close()
+			combinedTitle := strings.Join(titles, ", ")
+			if combinedTitle == "" {
+				combinedTitle = mt
+			}
+
 			h.syncNutritionToFit(
 				c,
-				mt, // 食事区分名をタイトルとして使用
+				combinedTitle, // 連結したレシピ名（卵かけご飯 等）を使用
 				nutrition.TotalCalories,
 				nutrition.TotalProtein,
 				nutrition.TotalFat,
@@ -782,9 +819,16 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 		return c.Status(500).SendString("トークンの解析に失敗しました")
 	}
 
+	mySourceID, _ := h.getOrCreateFitDataSource(userID, token)
+
 	// 2. Google Fit から活動データを取得 (Pull)
-	t, _ := time.Parse("2006-01-02", dateStr)
-	startTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	jst := time.FixedZone("Asia/Tokyo", 9*60*60)
+	cleanDate := dateStr
+	if len(dateStr) > 10 {
+		cleanDate = dateStr[:10]
+	}
+	t, _ := time.ParseInLocation("2006-01-02", cleanDate, jst)
+	startTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, jst)
 	endTime := startTime.Add(24 * time.Hour).Add(-time.Nanosecond)
 
 	client := h.OAuthConfig.Client(context.Background(), &token)
@@ -793,6 +837,7 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 		"aggregateBy": []map[string]interface{}{
 			{"dataTypeName": "com.google.step_count.delta"},
 			{"dataTypeName": "com.google.calories.expended"},
+			{"dataTypeName": "com.google.nutrition"},
 		},
 		"bucketByTime":    map[string]interface{}{"durationMillis": 86400000}, // 1日分
 		"startTimeMillis": startTime.UnixNano() / int64(time.Millisecond),
@@ -817,9 +862,16 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 		Bucket []struct {
 			Dataset []struct {
 				Point []struct {
-					Value []struct {
+					OriginDataSourceId string `json:"originDataSourceId"`
+					Value              []struct {
 						IntVal int     `json:"intVal"`
 						FpVal  float64 `json:"fpVal"`
+						MapVal []struct {
+							Key   string `json:"key"`
+							Value struct {
+								FpVal float64 `json:"fpVal"`
+							} `json:"value"`
+						} `json:"mapVal"`
 					} `json:"value"`
 				} `json:"point"`
 			} `json:"dataset"`
@@ -832,18 +884,27 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 
 	steps := 0
 	calories := 0.0
+	externalCalories := 0.0
 
 	// 取得したバケットから歩数とカロリーを抽出
 	if len(fitData.Bucket) > 0 {
-		for _, ds := range fitData.Bucket[0].Dataset {
+		for i, ds := range fitData.Bucket[0].Dataset {
 			for _, p := range ds.Point {
+				isMyData := p.OriginDataSourceId == mySourceID || (mySourceID != "" && strings.Contains(p.OriginDataSourceId, "RecipeApp"))
+
 				for _, v := range p.Value {
-					// 歩数は intVal、カロリーは fpVal に格納される
-					if v.IntVal > 0 {
+					if i == 0 && v.IntVal > 0 { // steps
 						steps += v.IntVal
 					}
-					if v.FpVal > 0 {
+					if i == 1 && v.FpVal > 0 { // burned calories
 						calories += v.FpVal
+					}
+					if i == 2 && !isMyData { // external nutrition
+						for _, mv := range v.MapVal {
+							if mv.Key == "calories" {
+								externalCalories += mv.Value.FpVal
+							}
+						}
 					}
 				}
 			}
@@ -851,10 +912,11 @@ func (h *FoodHandler) SyncHealthData(c *fiber.Ctx) error {
 	}
 
 	// 取得した活動データをDBに保存
-	_, _ = h.DB.Exec(`INSERT INTO daily_health_data (user_id, date, steps, burned_calories, is_synced) 
-		VALUES (?, ?, ?, ?, 1) 
-		ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories, is_synced=1`,
-		userID, dateStr, steps, int(calories))
+	_, _ = h.DB.Exec(`INSERT INTO daily_health_data (user_id, date, steps, burned_calories, external_intake_calories, is_synced) 
+		VALUES (?, ?, ?, ?, ?, 1) 
+		ON CONFLICT(user_id, date) DO UPDATE SET steps=excluded.steps, burned_calories=excluded.burned_calories, 
+		external_intake_calories=excluded.external_intake_calories, is_synced=1`,
+		userID, dateStr, steps, int(calories), int(externalCalories))
 
 	return c.Redirect("/calendar?date=" + dateStr)
 }
